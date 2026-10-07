@@ -1,0 +1,131 @@
+{
+ "run_id": "20261007T200653Z",
+ "passed": true,
+ "checks": [
+  {
+   "check": "unique biz_id in tracker",
+   "ok": true,
+   "detail": "1015 rows"
+  },
+  {
+   "check": "biz_id format",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "unique loan numbers",
+   "ok": true,
+   "detail": "1219 loans"
+  },
+  {
+   "check": "every matching source loan stored once",
+   "ok": true,
+   "detail": "1219 vs 1219"
+  },
+  {
+   "check": "matching rows = unique loans + duplicates",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "NAICS rows = >=150K + <150K",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "every loan maps to a tracker business",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "tracker loan_count equals loans.csv",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "business groups = current tracker rows",
+   "ok": true,
+   "detail": "1015"
+  },
+  {
+   "check": "no loan assigned to two businesses",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "ledger has no duplicate evidence rows",
+   "ok": true,
+   "detail": "2080 rows"
+  },
+  {
+   "check": "every current loan has a ledger row",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "ledger rows have URL + retrieval date + sha256",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "eligibility values valid",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "ready => verified TX + 30+ years",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "entity-type conflicts never ready/closed",
+   "ok": true,
+   "detail": "19 conflicts"
+  },
+  {
+   "check": "closed => verified TX record under threshold",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "outreach ready only where eligibility ready at ID creation",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "verified TX joins have name + address/ZIP corroboration",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "payroll proxy only on corporations with documented basis",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "pension plans carry retirement benefit codes",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "one row per business+plan (latest filing only)",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "registry IDs never reused",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "every tracker ID in registry",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "outreach_status column present",
+   "ok": true,
+   "detail": ""
+  }
+ ]
+}
