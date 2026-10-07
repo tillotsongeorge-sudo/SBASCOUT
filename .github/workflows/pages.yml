@@ -25,8 +25,9 @@ jobs:
       - name: Assemble static site
         run: |
           mkdir -p _site/data
-          cp index.html results.html scout-tracker.csv SCOUT.md _site/
+          cp index.html SCOUT.md _site/
           cp data/*.csv data/*.json _site/data/
+          cp -r states _site/
           touch _site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

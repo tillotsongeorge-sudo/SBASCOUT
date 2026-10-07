@@ -1,8 +1,15 @@
 # SCOUT.md: Off-market business scout runbook
 
-**Target:** Texas plumbing / HVAC contractors (NAICS 238220) that received PPP loans with
-`CurrentApprovalAmount >= $150,000`, cross-checked against Texas registration records and
+**Target:** plumbing / HVAC contractors (NAICS 238220) in one state that received PPP loans with
+`CurrentApprovalAmount >= $150,000`, cross-checked against state registration records and
 DOL retirement-plan filings.
+
+There are two state profiles in `scout_config.json`:
+- **Massachusetts** (`MA`) is the default.
+- **Texas** (`TX`) is the original run.
+
+Each state writes to its own folder, `states/<state>/`, with its own permanent ID registry. A
+`biz-001` in Massachusetts and a `biz-001` in Texas are different businesses.
 
 This runbook is portable. It needs only **Python 3.9+ (standard library only)**, outbound HTTPS,
 about 2.5 GB of free disk space, and about 1 GB of RAM. It does not depend on any agent "skill",
@@ -10,14 +17,40 @@ IDE, or hosted service. Any shell that can run Python and reach the four public 
 run it.
 
 ```bash
-python3 scout.py all          # fetch (reuses cached files) -> build -> verify
-python3 scout.py fetch --force  # re-download everything even if unchanged
-python3 scout.py build        # rebuild from data/raw without network
-python3 scout.py verify       # integrity checks only
+python3 scout.py all                # Massachusetts (default): fetch (cached) -> build -> verify
+python3 scout.py all --state TX     # Texas
+python3 scout.py fetch --force      # re-download everything even if unchanged
+python3 scout.py build --state MA   # rebuild from data/raw without network
+python3 scout.py verify --state MA  # integrity checks only
 ```
 
-The settings live in `scout_config.json`: state, NAICS code, amount threshold, age threshold, ID
-format, and source URLs.
+The settings live in `scout_config.json`: default state, state profiles, NAICS code, amount
+threshold, age threshold, ID format, and source URLs. Raw downloads and the download log are shared
+in `data/`, because the SBA and DOL files are national. Everything else is per state, under
+`states/<state>/`.
+
+## Massachusetts: what differs
+
+Massachusetts has **no free source for business-age records**, so the registration stage cannot
+run. Every Massachusetts business is therefore `review`, and none can be `ready`, until a source is
+added. The blocked sources, each logged once in `states/ma/data/unavailable_sources.csv`:
+
+- **Secretary of the Commonwealth, Corporations Division.** Organization dates are sold only as a
+  paid bulk extract ($4,800/year or $100/week, per 950 CMR 113.15). The free search at
+  `corp.sec.state.ma.us` is per-entity and behind bot protection, so it is not scraped.
+- **Original plumbing, gas-fitting, and sheet-metal license dates (DOL eLIPSE).** eLIPSE offers
+  per-license lookups only. The MA Professional Licensing API needs a municipality or vendor key.
+- **OpenCorporates (`us_ma`).** Requires an API token, and it is a third-party mirror.
+
+Without a registry record there is also no independent EIN. Massachusetts pension matches therefore
+rely on sponsor name plus address only, and score at most `medium`.
+
+**To enable `ready` for Massachusetts**, add a `registry` adapter for one of these:
+- the purchased SOC extract (needs its file layout);
+- a licensing API key, added as a secret;
+- manual SOC lookups of review rows, recorded in a CSV (date, URL, and SOC ID per `biz_id`).
+
+The same eligibility rules then apply unchanged.
 
 ## 0. Capability check (do this first)
 
@@ -30,7 +63,7 @@ describe it.
 |---|---|
 | Run code | `python3 -c "print('ok')"` |
 | Download full files | `curl -sSI https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv` returns 200 with a ~452 MB length |
-| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$limit=1"` returns JSON |
+| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$limit=1"` returns JSON (needed for Texas only) |
 | Save outputs | `touch data/.w && rm data/.w` |
 
 ## 1. Sources
@@ -38,7 +71,7 @@ describe it.
 | source_id | What | URL |
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
-| `TX_FRANCHISE_9CIR_EFMM` | Texas Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows) | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
+| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
 | `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
@@ -46,7 +79,7 @@ git-ignored because of their size. Every fetch appends to `data/download_log.csv
 final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256, and the action
 taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the
 input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
-`data/extracts/sba_ppp_tx_238220_150k_raw_rows.csv`.
+`states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
 
 **Encoding:** each line is decoded as strict UTF-8 first, then cp1252, then latin-1. The counts
 from each step go into `data/source_manifest.json`. The SBA file decodes as **cp1252**.
@@ -54,10 +87,15 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
 ## 2. Pipeline stages
 
 1. **SBA filter (streamed).** Every row is read, without loading the file into memory. A row is kept
-   when `BorrowerState == "TX"`, `NAICSCode == "238220"`, and `CurrentApprovalAmount >= 150000`.
-   The pipeline records source data rows, physical lines, malformed rows, TX rows, TX+NAICS rows,
-   rows below the threshold, and duplicate `LoanNumber`s. Rows with a blank BorrowerState but
-   ProjectState=TX are counted and listed but **excluded**, because the rule is BorrowerState.
+   when `BorrowerState` equals the state, `NAICSCode == "238220"`, and
+   `CurrentApprovalAmount >= 150000`. The pipeline records:
+   - source data rows, physical lines, and malformed rows;
+   - rows in the state, and rows in the state with the NAICS code;
+   - rows below the amount threshold;
+   - duplicate `LoanNumber`s.
+
+   Rows with a blank BorrowerState but a matching ProjectState are counted and listed but
+   **excluded**, because the rule is BorrowerState.
 2. **Loans.** Each `LoanNumber` is stored once in `data/loans.csv`. First draws (`PPP`) and second
    draws (`PPS`) are separate rows and are never merged.
 3. **Business grouping.** Loans are linked with union-find when any of these holds:
@@ -74,7 +112,10 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    never reused or renumbered. If a rerun merges two IDs, the lower one survives, the other is
    marked `merged` in the registry, and non-pipeline tracker columns are carried over. Businesses
    that vanish from the source stay in the tracker with `in_current_source=no`.
-5. **Texas registration (9cir-efmm).** Candidates come from an equal normalized name (legal name or
+5. **Registration.** Texas uses 9cir-efmm, as described here. Massachusetts has no registry source
+   (see above), so every business gets `reg_match_status=not_checked`. The registry columns are
+   named `reg_*`. Old `tx_*` columns are renamed automatically on the next run. For Texas,
+   candidates come from an equal normalized name (legal name or
    documented DBA) or an equal street+ZIP with a similar name.
    - `high`: the legal name matches (entity suffix ignored) **and** the street address (or house
      number + street) and ZIP match
@@ -109,8 +150,9 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
      digit, taken from the verified Texas record. Comptroller-assigned `3...` numbers carry no EIN.
    - or the sponsor name / DBA name equal to the business legal name or DBA.
 
-   Confidence: `high` when the EIN and name agree, or the name and street agree. `medium` when the
-   name and ZIP agree, or the EIN and address agree. `low` goes to review and is never used. An
+   Confidence: `high` needs the independent EIN plus a name match. A name + street match is `high`
+   only when the EIN also agrees; otherwise it is `medium`. `medium` also covers name + ZIP, and
+   EIN + address. `low` goes to review and is never used. An
    uncertain pension join only puts that plan in review. It never changes `eligibility_status`,
    because pensions are informational, not an eligibility test.
 
@@ -154,10 +196,14 @@ owned ones.
 
 ## 4. Outputs
 
+All paths below are relative to `states/<state>/`, except `data/download_log.csv` and
+`data/source_manifest.json`, which are shared at the repository root.
+
 | File | Contents |
 |---|---|
 | `scout-tracker.csv` | One row per business (`biz_id`) |
-| `results.html` | Readable page with stage counts, five ready businesses with clickable evidence, unknowns, coverage, and unavailable sources (`index.html` redirects to it) |
+| `results.html` | Readable page with stage counts, five ready businesses with clickable evidence (or, when none are ready, the five strongest review records, clearly labelled), unknowns, coverage, and unavailable sources. The root `index.html` redirects to Massachusetts. |
+| `data/build_manifest.json` | Per-state stage statistics |
 | `data/loans.csv` | One row per PPP loan/draw |
 | `data/source_ledger.csv` | One row per (biz_id, source_id, source_record_id) with URL, retrieval date, source SHA-256, reporting period, match method, evidence, confidence, and first/last run |
 | `data/tx_franchise_candidates.csv` | Every Texas candidate considered, with confidence and evidence |
@@ -187,6 +233,9 @@ owned ones.
 
 ## 6. Rerun checklist
 
-1. `python3 scout.py all`, then confirm `data/verification.json` shows `"passed": true`.
-2. Check `data/run_history.csv`. When the source hash is unchanged, `new_ids` should be `0`.
-3. Check `git diff scout-tracker.csv`. Only `last_seen_run` should change for unchanged sources.
+1. `python3 scout.py all --state MA` (and/or `--state TX`), then confirm
+   `states/<state>/data/verification.json` shows `"passed": true`.
+2. Check `states/<state>/data/run_history.csv`. When the source hash is unchanged, `new_ids` should
+   be `0`.
+3. Check `git diff states/<state>/scout-tracker.csv`. Only `last_seen_run` should change for
+   unchanged sources.

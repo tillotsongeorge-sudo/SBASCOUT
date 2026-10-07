@@ -1,6 +1,6 @@
 {
+  "default_state": "MA",
   "target": {
-    "borrower_state": "TX",
     "naics_code": "238220",
     "naics_label": "Plumbing, Heating, and Air-Conditioning Contractors",
     "min_current_approval_amount": 150000
@@ -38,7 +38,44 @@
     }
   },
   "dol_plan_years": "auto-latest-2",
-  "known_unavailable_sources": [
+  "states": {
+    "MA": {
+      "state_name": "Massachusetts",
+      "registry": null,
+      "registry_label": "Massachusetts SOC Corporations registry",
+      "registry_unavailable_note": "No free bulk Massachusetts registry or original trade-license dataset is available (see unavailable sources). Organization dates are unknown, so no Massachusetts business can be marked ready.",
+      "unavailable_sources": [
+        {
+          "source_id": "MA_SOC_CORPORATIONS_BULK",
+          "name": "Massachusetts Secretary of the Commonwealth, Corporations Division: entity organization dates",
+          "checked_url": "https://www.sec.state.ma.us/divisions/corporations/download/950113.pdf",
+          "reason": "No free bulk data. 950 CMR 113.15 offers the full Corporations Information Management System extract only for purchase ($4,800/year or $100/week; file layout on request). The public search (corp.sec.state.ma.us) is per-entity and protected by bot detection (Incapsula), so it is not queried automatically."
+        },
+        {
+          "source_id": "MA_TRADE_LICENSE_ORIGINAL_DATES",
+          "name": "Original issue dates for Massachusetts plumbing/gas-fitting and sheet-metal business licenses (DOL eLIPSE)",
+          "checked_url": "https://www.mass.gov/info-details/division-of-occupational-licensure-check-a-license",
+          "reason": "Plumbers and Gas Fitters and Sheet Metal boards are on eLIPSE, which offers per-license lookups only. The MA Professional Licensing API requires a key issued to municipalities/vendors. The free OPSI facility export (madpl.mylicense.com) has no plumbing/HVAC business licenses."
+        },
+        {
+          "source_id": "OPENCORPORATES_MA",
+          "name": "OpenCorporates mirror of Massachusetts registry (us_ma)",
+          "checked_url": "https://api.opencorporates.com/v0.4/companies/search?jurisdiction_code=us_ma",
+          "reason": "Requires an API token (HTTP 401 without one), and it is a third-party mirror rather than the SOC record."
+        },
+        {
+          "source_id": "SBA_PPP_PER_LOAN_PAGE",
+          "name": "Per-loan web page on data.sba.gov",
+          "checked_url": "https://data.sba.gov/dataset/ppp-foia",
+          "reason": "SBA publishes only bulk CSVs; loan evidence links point to the CSV plus the LoanNumber."
+        }
+      ]
+    },
+    "TX": {
+      "state_name": "Texas",
+      "registry": "TX_FRANCHISE_9CIR_EFMM",
+      "registry_label": "Texas Active Franchise Taxpayers",
+      "unavailable_sources": [
     {
       "source_id": "TX_TRADE_LICENSE_ORIGINAL_DATES",
       "name": "Original issue dates for Texas HVAC (TDLR) and plumbing (TSBPE) licenses",
@@ -57,5 +94,7 @@
       "checked_url": "https://data.sba.gov/dataset/ppp-foia",
       "reason": "SBA publishes only bulk CSVs; loan evidence links point to the CSV plus the LoanNumber."
     }
-  ]
+      ]
+    }
+  }
 }
