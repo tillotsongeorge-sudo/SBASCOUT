@@ -1,110 +1,4 @@
 {
- "build": {
-  "pension": {
-   "eins_known_from_texas": 353,
-   "files": {
-    "DOL_FORM_5500_2024": {
-     "bytes": 28642573,
-     "candidate_rows": 102,
-     "candidate_rows_without_retirement_benefit_code": 56,
-     "data_rows": 226436,
-     "encoding_detected": "ascii (utf-8 compatible)",
-     "lines_decoded_cp1252_fallback": 0,
-     "lines_decoded_latin1_fallback": 0,
-     "lines_utf8_non_ascii": 0,
-     "member": "f_5500_2024_latest.csv",
-     "physical_lines": 226437,
-     "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-     "sha256": "8884391d48a9e362fd7d2b91d6e37430bd2e54355c9dbc3479985c9d876872f8"
-    },
-    "DOL_FORM_5500_2025": {
-     "bytes": 12945186,
-     "candidate_rows": 37,
-     "candidate_rows_without_retirement_benefit_code": 24,
-     "data_rows": 105214,
-     "encoding_detected": "ascii (utf-8 compatible)",
-     "lines_decoded_cp1252_fallback": 0,
-     "lines_decoded_latin1_fallback": 0,
-     "lines_utf8_non_ascii": 0,
-     "member": "f_5500_2025_latest.csv",
-     "physical_lines": 105215,
-     "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-     "sha256": "9f6245cdcbb86ae167af4595bb3dba4fbf7845df98f4ccd6748aa98fa2a4e582"
-    },
-    "DOL_FORM_5500_SF_2024": {
-     "bytes": 136400721,
-     "candidate_rows": 358,
-     "candidate_rows_without_retirement_benefit_code": 3,
-     "data_rows": 799188,
-     "encoding_detected": "ascii (utf-8 compatible)",
-     "lines_decoded_cp1252_fallback": 0,
-     "lines_decoded_latin1_fallback": 0,
-     "lines_utf8_non_ascii": 0,
-     "member": "f_5500_sf_2024_latest.csv",
-     "physical_lines": 799189,
-     "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-     "sha256": "11370908e2bbc78d1d418b2f2a2177875e0524c12b69a181432d6fd65a5966c3"
-    },
-    "DOL_FORM_5500_SF_2025": {
-     "bytes": 105100962,
-     "candidate_rows": 278,
-     "candidate_rows_without_retirement_benefit_code": 1,
-     "data_rows": 635438,
-     "encoding_detected": "ascii (utf-8 compatible)",
-     "lines_decoded_cp1252_fallback": 0,
-     "lines_decoded_latin1_fallback": 0,
-     "lines_utf8_non_ascii": 0,
-     "member": "f_5500_sf_2025_latest.csv",
-     "physical_lines": 635439,
-     "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-     "sha256": "2db4677bd93455ccc082d378fdd56594ac90ca0fc6f2da1639a15aea8ed3e94d"
-    }
-   },
-   "low_confidence_plan_rows_review": 251,
-   "matched_plan_rows": 256,
-   "plan_years": [
-    2024,
-    2025
-   ]
-  },
-  "run_id": "20261007T200556Z",
-  "sba": {
-   "bytes": 452077279,
-   "data_as_of": "2024-09-30",
-   "duplicate_loan_numbers_in_matches": 0,
-   "encoding_detected": "cp1252",
-   "excluded_blank_borrowerstate_but_projectstate_tx": 0,
-   "extract_sha256": "0fa94ed2294c8d911f6fd626f53958ba275ed0e90d0380a90df805495ae9a056",
-   "header_columns": 53,
-   "lines_decoded_cp1252_fallback": 3402,
-   "lines_decoded_latin1_fallback": 0,
-   "lines_utf8_non_ascii": 0,
-   "matching_unique_loans": 1219,
-   "physical_lines": 968525,
-   "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-   "rows_borrower_state_tx": 76193,
-   "rows_tx_naics_238220": 1219,
-   "rows_tx_naics_amount_ge_150k": 1219,
-   "sha256": "3760a581dc3fd7ca12d09996aa360d749e075bcac517e5a6f7e92ae447a1cb8c",
-   "source_data_rows": 968524,
-   "source_url": "https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv"
-  },
-  "texas": {
-   "available": true,
-   "bytes": 469377711,
-   "candidate_rows": 922,
-   "data_rows": 3484555,
-   "dataset_rows_updated_at": "2026-10-03T08:44:55+00:00",
-   "encoding_detected": "utf-8",
-   "lines_decoded_cp1252_fallback": 0,
-   "lines_decoded_latin1_fallback": 0,
-   "lines_utf8_non_ascii": 58,
-   "physical_lines": 3484618,
-   "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-   "sha256": "d729e973bf0dd232fc355fff82b6d03d9116cfb1749d75b2d8ae6e3756e91249",
-   "upgraded_via_dol_ein_address": 12
-  }
- },
  "fetch": {
   "dol_plan_years": [
    2024,
@@ -187,6 +81,6 @@
     "url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD"
    }
   },
-  "run_id": "20261007T195728Z"
+  "run_id": "20261007T202838Z"
  }
 }

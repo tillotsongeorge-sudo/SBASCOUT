@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Off-market business scout: TX / NAICS 238220 / PPP >= $150K.
+"""Off-market business scout: NAICS 238220 / PPP >= $150K, one state profile per run.
 
 Standard library only. See SCOUT.md for the runbook.
 
-    python3 scout.py all        # fetch (cached) + build + verify
-    python3 scout.py fetch      # download sources, write data/download_log.csv
-    python3 scout.py build      # filter, group, match, write tracker + page
-    python3 scout.py verify     # integrity checks on the current outputs
+    python3 scout.py all [--state MA]     # fetch (cached) + build + verify
+    python3 scout.py fetch [--state MA]   # download sources, write data/download_log.csv
+    python3 scout.py build [--state MA]   # filter, group, match, write tracker + page
+    python3 scout.py verify [--state MA]  # integrity checks on the current outputs
+
+Without --state the config's default_state is used. Outputs go to states/<state>/.
 """
 import csv
 import datetime as dt
@@ -23,16 +25,35 @@ import zipfile
 from collections import Counter, defaultdict
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA = os.path.join(ROOT, "data")
-RAW = os.path.join(DATA, "raw")
+SHARED = os.path.join(ROOT, "data")
+RAW = os.path.join(SHARED, "raw")
 CFG = json.load(open(os.path.join(ROOT, "scout_config.json")))
-TRACKER = os.path.join(ROOT, "scout-tracker.csv")
-RESULTS = os.path.join(ROOT, "results.html")
+
+
+def _state_arg():
+    for i, a in enumerate(sys.argv):
+        if a == "--state" and i + 1 < len(sys.argv):
+            return sys.argv[i + 1].upper()
+        if a.startswith("--state="):
+            return a.split("=", 1)[1].upper()
+    return CFG["default_state"].upper()
+
+
+STATE = _state_arg()
+if STATE not in CFG["states"]:
+    raise SystemExit(f"unknown state {STATE}; configured: {', '.join(CFG['states'])}")
+PROFILE = CFG["states"][STATE]
+CFG["target"] = {**CFG["target"], "borrower_state": STATE}
+OUT = os.path.join(ROOT, "states", STATE.lower())
+DATA = os.path.join(OUT, "data")
+TRACKER = os.path.join(OUT, "scout-tracker.csv")
+RESULTS = os.path.join(OUT, "results.html")
 
 P = {
-    "download_log": os.path.join(DATA, "download_log.csv"),
-    "manifest": os.path.join(DATA, "source_manifest.json"),
-    "sba_extract": os.path.join(DATA, "extracts", "sba_ppp_tx_238220_150k_raw_rows.csv"),
+    "download_log": os.path.join(SHARED, "download_log.csv"),
+    "manifest": os.path.join(SHARED, "source_manifest.json"),
+    "build_manifest": os.path.join(DATA, "build_manifest.json"),
+    "sba_extract": os.path.join(DATA, "extracts", f"sba_ppp_{STATE.lower()}_238220_150k_raw_rows.csv"),
     "loans": os.path.join(DATA, "loans.csv"),
     "registry": os.path.join(DATA, "business_registry.csv"),
     "ledger": os.path.join(DATA, "source_ledger.csv"),
@@ -56,7 +77,7 @@ TODAY = NOW.date()
 # small IO helpers
 # --------------------------------------------------------------------------
 def ensure_dirs():
-    for d in (DATA, RAW, os.path.dirname(P["sba_extract"])):
+    for d in (SHARED, RAW, DATA, os.path.dirname(P["sba_extract"])):
         os.makedirs(d, exist_ok=True)
 
 
@@ -261,17 +282,17 @@ def cmd_fetch(force=False):
     fetched["SBA_PPP_150K_PLUS"] = safe_download("SBA_PPP_150K_PLUS", sba_url, os.path.join(RAW, s["raw_file"]), force)
     if fetched["SBA_PPP_150K_PLUS"]:
         fetched["SBA_PPP_150K_PLUS"]["discovery"] = how
-    t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
-    tx_meta = {}
-    try:
-        m = json.load(http_get(t["metadata_url"]))
-        tx_meta = {"rows_updated_at": dt.datetime.fromtimestamp(m.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
-                   "attribution": m.get("attribution")}
-    except Exception as e:  # noqa: BLE001
-        tx_meta = {"error": str(e)}
-    fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
-    if fetched["TX_FRANCHISE_9CIR_EFMM"]:
-        fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
+    if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
+        t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
+        try:
+            m = json.load(http_get(t["metadata_url"]))
+            tx_meta = {"rows_updated_at": dt.datetime.fromtimestamp(m.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
+                       "attribution": m.get("attribution")}
+        except Exception as e:  # noqa: BLE001
+            tx_meta = {"error": str(e)}
+        fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
+        if fetched["TX_FRANCHISE_9CIR_EFMM"]:
+            fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
     years = discover_dol_years()
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
@@ -281,7 +302,10 @@ def cmd_fetch(force=False):
                                          os.path.join(RAW, d["raw_file_template"].format(year=y)), force)
             if fetched[key]:
                 fetched[key]["plan_year"] = y
-    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": fetched}
+    files = (manifest.get("fetch") or {}).get("files") or {}
+    files.update({k: v for k, v in fetched.items() if v})
+    manifest.pop("build", None)
+    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": files}
     save_manifest(manifest)
     return manifest
 
@@ -474,11 +498,11 @@ def stage_sba(manifest):
             naics = row[ix["NAICSCode"]].strip()
             amt = money(row[ix["CurrentApprovalAmount"]])
             if st == tgt["borrower_state"]:
-                c["rows_borrower_state_tx"] += 1
+                c["rows_borrower_state_match"] += 1
                 if naics == tgt["naics_code"]:
-                    c["rows_tx_naics_238220"] += 1
+                    c["rows_state_naics"] += 1
                     if amt >= tgt["min_current_approval_amount"]:
-                        c["rows_tx_naics_amount_ge_150k"] += 1
+                        c["rows_state_naics_amount_ge_150k"] += 1
                         rec = dict(zip(header, row))
                         ln = rec["LoanNumber"].strip()
                         if ln in loans:
@@ -487,7 +511,7 @@ def stage_sba(manifest):
                         loans[ln] = rec
                         w.writerow(row)
                     else:
-                        c["rows_tx_naics_amount_lt_150k"] += 1
+                        c["rows_state_naics_amount_lt_150k"] += 1
             elif not st and naics == tgt["naics_code"] and row[ix["ProjectState"]].strip().upper() == tgt["borrower_state"] \
                     and amt >= tgt["min_current_approval_amount"]:
                 near_miss.append(row[ix["LoanNumber"]])
@@ -497,7 +521,7 @@ def stage_sba(manifest):
     stats["header_columns"] = len(header)
     stats["duplicate_loan_numbers_in_matches"] = len(dup_numbers)
     stats["matching_unique_loans"] = len(loans)
-    stats["excluded_blank_borrowerstate_but_projectstate_tx"] = len(near_miss)
+    stats["excluded_blank_borrowerstate_but_projectstate_match"] = len(near_miss)
     stats["excluded_blank_borrowerstate_loan_numbers"] = near_miss[:200]
     stats["sha256"] = (f or {}).get("sha256") or sha256_file(path)
     stats["bytes"] = os.path.getsize(path)
@@ -788,15 +812,15 @@ def write_tx_candidates(tx_results):
         tr = tx_results[bid]
         for c in tr["candidates"]:
             chosen = "selected" if tr.get("match") is c else ""
-            rows.append({"biz_id": bid, "tx_match_status": tr["status"], "selected": chosen,
+            rows.append({"biz_id": bid, "reg_match_status": tr["status"], "selected": chosen,
                          **{k: v for k, v in c.items() if not k.startswith("_")}})
-    write_csv(P["tx_candidates"], ["biz_id", "tx_match_status", "selected", "confidence", "via", "exact_full", "suffix_conflict", "taxpayer_number",
+    write_csv(P["tx_candidates"], ["biz_id", "reg_match_status", "selected", "confidence", "via", "exact_full", "suffix_conflict", "taxpayer_number",
                                     "taxpayer_name", "taxpayer_address", "taxpayer_city", "taxpayer_state", "taxpayer_zip",
                                     "org_type", "record_type_code", "sos_file_number", "sos_charter_date", "sos_status_code",
                                     "right_to_transact_code", "responsibility_beginning_date", "tx_naics", "evidence"], rows)
 
 
-def ein_from_tx_taxpayer_number(tpn):
+def ein_from_reg_record_id(tpn):
     """Texas taxpayer numbers that start with '1' are the FEIN prefixed by 1 plus a check digit."""
     d = re.sub(r"\D", "", tpn or "")
     return d[1:10] if len(d) == 11 and d[0] == "1" else ""
@@ -842,7 +866,7 @@ def pension_targets(groups, tx_results, verified_only):
         recs = [tr["match"]] if tr.get("status") == "verified" else ([] if verified_only else tr.get("candidates", []))
         for m in recs:
             name_to_biz[m["_core"]].add(bid)
-            e = ein_from_tx_taxpayer_number(m["taxpayer_number"])
+            e = ein_from_reg_record_id(m["taxpayer_number"])
             if e:
                 ein_to_biz[e].add(bid)
             if tr.get("status") == "verified":
@@ -875,7 +899,7 @@ def corroborate_texas_via_dol(groups, tx_results, hits):
         if len(named) != 1:
             continue
         c = named[0]
-        fein = ein_from_tx_taxpayer_number(c["taxpayer_number"])
+        fein = ein_from_reg_record_id(c["taxpayer_number"])
         if not fein:
             continue
         streets = {(k["street"], k["zip5"]) for k in g["ids"]}
@@ -1015,8 +1039,8 @@ OWNED_COLUMNS = [
     "identity_evidence",
     "loan_count", "loan_numbers", "draws", "loan_amounts_current", "loan_approval_dates", "loan_statuses",
     "lenders", "jobs_reported_by_loan", "historical_payroll_proxy_annual", "payroll_proxy_basis",
-    "tx_match_status", "tx_match_confidence", "tx_match_evidence", "tx_taxpayer_number", "tx_taxpayer_name",
-    "tx_org_type", "tx_sos_file_number", "tx_right_to_transact_code", "record_date", "record_date_meaning",
+    "reg_match_status", "reg_match_confidence", "reg_match_evidence", "reg_record_id", "reg_record_name",
+    "reg_org_type", "reg_sos_file_number", "reg_status_code", "record_date", "record_date_meaning",
     "record_date_source", "record_age_years", "record_age_30plus",
     "pension_status", "pension_plan_ids", "pension_plan_periods", "pension_filing_dates",
     "pension_active_participants_by_plan", "pension_largest_single_plan_active_participants", "pension_match_evidence",
@@ -1055,9 +1079,18 @@ def payroll_proxy(rec):
     return round(annual), f"{rec['LoanNumber']} ({pm}, {rec['DateApproved']}): {amt:,.2f} / 2.5 x 12"
 
 
+LEGACY_COLUMNS = {"tx_match_status": "reg_match_status", "tx_match_confidence": "reg_match_confidence",
+                  "tx_match_evidence": "reg_match_evidence", "tx_taxpayer_number": "reg_record_id",
+                  "tx_taxpayer_name": "reg_record_name", "tx_org_type": "reg_org_type",
+                  "tx_sos_file_number": "reg_sos_file_number", "tx_right_to_transact_code": "reg_status_code"}
+
+
 def build_tracker(groups, loans, tx_results, pension, sba_stats, new_ids, merges, review_notes):
     old_fields, old_rows = read_csv(TRACKER)
+    old_fields = [LEGACY_COLUMNS.get(c, c) for c in old_fields]
+    old_rows = [{LEGACY_COLUMNS.get(k, k): v for k, v in r.items()} for r in old_rows]
     old = {r["biz_id"]: r for r in old_rows}
+    reg = PROFILE.get("registry_label", "state registry")
     for other, into in merges:
         if other in old and into in old:
             for k, v in old[other].items():
@@ -1116,20 +1149,19 @@ def build_tracker(groups, loans, tx_results, pension, sba_stats, new_ids, merges
                            "source_name": CFG["sources"]["SBA_PPP_150K_PLUS"]["name"], "url": sba_url,
                            "retrieved_date": sba_stats.get("retrieved_at_utc", "")[:10], "source_sha256": sba_stats["sha256"],
                            "reporting_period": f"loan approved {r['DateApproved']}; SBA data as of {sba_stats['data_as_of']}",
-                           "match_method": "filter BorrowerState=TX, NAICSCode=238220, CurrentApprovalAmount>=150000",
+                           "match_method": f"filter BorrowerState={STATE}, NAICSCode={CFG['target']['naics_code']}, CurrentApprovalAmount>={CFG['target']['min_current_approval_amount']}",
                            "match_evidence": f"{r['BorrowerName']}, {r['BorrowerAddress']}, {r['BorrowerCity']} {r['BorrowerZip']}; group: {'; '.join(evidence)}",
                            "match_confidence": "source record"})
-        # Texas registration
-        tr = tx_results.get(bid, {"status": "not_checked", "candidates": [], "note": "Texas source unavailable"})
-        row["tx_match_status"] = tr["status"]
+        tr = tx_results.get(bid, {"status": "not_checked", "candidates": [], "note": f"{reg} unavailable"})
+        row["reg_match_status"] = tr["status"]
         m = tr.get("match")
         if m:
             cd = parse_date(m["sos_charter_date"])
             rt = (m["record_type_code"] or "").strip()
             row.update({
-                "tx_match_confidence": m["confidence"], "tx_match_evidence": m["evidence"] + (f"; {tr['note']}" if tr["note"] else ""),
-                "tx_taxpayer_number": m["taxpayer_number"], "tx_taxpayer_name": m["taxpayer_name"], "tx_org_type": m["org_type"],
-                "tx_sos_file_number": m["sos_file_number"], "tx_right_to_transact_code": m["right_to_transact_code"],
+                "reg_match_confidence": m["confidence"], "reg_match_evidence": m["evidence"] + (f"; {tr['note']}" if tr["note"] else ""),
+                "reg_record_id": m["taxpayer_number"], "reg_record_name": m["taxpayer_name"], "reg_org_type": m["org_type"],
+                "reg_sos_file_number": m["sos_file_number"], "reg_status_code": m["right_to_transact_code"],
                 "record_date": cd.isoformat() if cd else "unknown",
                 "record_date_meaning": RECORD_TYPE_MEANING.get(rt, f"record type '{rt}'") if cd else RECORD_TYPE_MEANING.get(rt, "no SOS charter date"),
                 "record_date_source": "TX Comptroller Active Franchise Taxpayers (9cir-efmm) field 'SOS Charter Date'" if cd else "",
@@ -1143,11 +1175,13 @@ def build_tracker(groups, loans, tx_results, pension, sba_stats, new_ids, merges
                            "match_method": f"name + address join ({m['via']})", "match_evidence": m["evidence"],
                            "match_confidence": m["confidence"]})
         else:
-            row.update({"tx_match_confidence": "", "tx_match_evidence": tr["note"], "record_date": "unknown",
+            row.update({"reg_match_confidence": "", "reg_match_evidence": tr["note"], "record_date": "unknown",
+                        "reg_record_id": "", "reg_record_name": "", "reg_org_type": "", "reg_sos_file_number": "",
+                        "reg_status_code": "",
                         "record_date_meaning": "", "record_date_source": "", "record_age_years": "unknown", "record_age_30plus": "unknown"})
         for c in tr.get("candidates", []):
             if tr["status"] == "review":
-                review_rows.append({"biz_id": bid, "stage": "texas_registration", "reason": tr["note"], "candidate_id": c["taxpayer_number"],
+                review_rows.append({"biz_id": bid, "stage": "registration", "reason": tr["note"], "candidate_id": c["taxpayer_number"],
                                     "candidate_name": c["taxpayer_name"], "candidate_date": c["sos_charter_date"],
                                     "confidence": c["confidence"], "evidence": c["evidence"],
                                     "url": tx_rec_url.format(id=c["taxpayer_number"])})
@@ -1184,23 +1218,23 @@ def build_tracker(groups, loans, tx_results, pension, sba_stats, new_ids, merges
                                 "url": p["source_url"]})
         # eligibility
         if tr["status"] == "verified" and m.get("suffix_conflict"):
-            elig, why = "review", f"Texas record {row['record_date']} matched but entity type differs from PPP borrower; confirm conversion history"
+            elig, why = "review", f"{reg} record {row['record_date']} matched but entity type differs from PPP borrower; confirm conversion history"
         elif tr["status"] == "verified" and row["record_age_30plus"] == "yes":
-            elig, why = "ready", f"verified Texas record ({row['tx_match_confidence']}) with record date {row['record_date']} ({row['record_age_years']} years)"
+            elig, why = "ready", f"verified {reg} record ({row['reg_match_confidence']}) with record date {row['record_date']} ({row['record_age_years']} years)"
         elif tr["status"] == "verified" and row["record_age_30plus"] == "no":
-            elig, why = "closed", f"verified Texas record dated {row['record_date']} is under {CFG['age_threshold_years']} years"
+            elig, why = "closed", f"verified {reg} record dated {row['record_date']} is under {CFG['age_threshold_years']} years"
         elif tr["status"] == "verified":
-            elig, why = "review", "verified Texas record but no SOS charter date"
+            elig, why = "review", f"verified {reg} record but no SOS charter date"
         elif tr["status"] == "review":
-            elig, why = "review", f"uncertain Texas join: {tr['note']}"
+            elig, why = "review", f"uncertain {reg} join: {tr['note']}"
         else:
             elig, why = "review", f"record date unknown: {tr['note']}"
-            if any(t in row["sba_business_type"] for t in ("Sole Proprietorship", "Self-Employed", "Independent Contractor")):
+            if STATE == "TX" and any(t in row["sba_business_type"] for t in ("Sole Proprietorship", "Self-Employed", "Independent Contractor")):
                 why += " (sole proprietors are not franchise taxpayers)"
         row["eligibility_status"], row["eligibility_reason"] = elig, why
         links = [f"SBA PPP CSV (LoanNumber {';'.join(r['LoanNumber'] for r in recs)}) {sba_url}"]
         if m:
-            links.append(f"Texas record {tx_rec_url.format(id=m['taxpayer_number'])}")
+            links.append(f"{reg} record {tx_rec_url.format(id=m['taxpayer_number'])}")
         for p in plans:
             links.append(f"DOL {p['form']} {p['dataset_year']} ACK {p['ack_id']} {p['source_url']}")
         row["evidence_links"] = " | ".join(links)
@@ -1289,18 +1323,25 @@ TX_STATS, PENSION_STATS = {}, {"files": {}}
 def cmd_build():
     ensure_dirs()
     manifest = load_manifest()
-    for u in CFG["known_unavailable_sources"]:
+    for u in PROFILE.get("unavailable_sources", []):
         log_unavailable(u["source_id"], u["name"], u["checked_url"], u["reason"])
     loans, sba_stats = stage_sba(manifest)
     sba_stats["retrieved_at_utc"] = ((manifest.get("fetch", {}).get("files") or {}).get("SBA_PPP_150K_PLUS") or {}).get("retrieved_at_utc", "")
     groups, review_notes = group_loans(loans)
     new_ids, merges = assign_ids(groups, loans)
-    tx_results, tx_stats = stage_texas(groups, manifest)
+    if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
+        tx_results, tx_stats = stage_texas(groups, manifest)
+    else:
+        note = PROFILE["registry_unavailable_note"]
+        tx_results = {g["biz_id"]: {"status": "not_checked", "match": None, "candidates": [], "note": note} for g in groups}
+        tx_stats = {"available": False, "note": note}
     TX_STATS.update(tx_stats)
     hits, pstats = scan_dol(groups, tx_results, manifest)
-    tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
+    if tx_stats.get("available"):
+        tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
     pension, pstats = match_pension(groups, tx_results, hits, pstats)
-    write_tx_candidates(tx_results)
+    if tx_stats.get("available"):
+        write_tx_candidates(tx_results)
     PENSION_STATS.update(pstats)
     rows, review_rows, ledger, _ = build_tracker(groups, loans, tx_results, pension, sba_stats, new_ids, merges, review_notes)
     write_loans(groups, loans)
@@ -1310,11 +1351,12 @@ def cmd_build():
     coverage = {
         "run_id": RUN_ID, "as_of_date": TODAY.isoformat(),
         "sba": {k: v for k, v in sba_stats.items() if k != "excluded_blank_borrowerstate_loan_numbers"},
-        "sba_blank_borrowerstate_projectstate_tx_loans": sba_stats["excluded_blank_borrowerstate_loan_numbers"],
+        "state": STATE, "registry_label": PROFILE.get("registry_label"),
+        "sba_blank_borrowerstate_projectstate_match_loans": sba_stats["excluded_blank_borrowerstate_loan_numbers"],
         "business_groups": len(groups), "multi_loan_groups": sum(1 for g in groups if len(g["loans"]) > 1),
         "new_ids_this_run": new_ids, "id_merges_this_run": merges,
-        "texas": tx_stats, "texas_match_status": cnt("tx_match_status"),
-        "texas_match_confidence": cnt("tx_match_confidence"), "record_age_30plus": cnt("record_age_30plus"),
+        "registry": tx_stats, "registry_match_status": cnt("reg_match_status"),
+        "registry_match_confidence": cnt("reg_match_confidence"), "record_age_30plus": cnt("record_age_30plus"),
         "pension": pstats, "pension_status": cnt("pension_status"),
         "payroll_proxy_known": sum(1 for r in cur if r["historical_payroll_proxy_annual"] != "unknown"),
         "eligibility_status": cnt("eligibility_status"), "outreach_status": cnt("outreach_status"),
@@ -1322,8 +1364,8 @@ def cmd_build():
         "ledger_rows": n_ledger, "tracker_rows": len(rows),
     }
     json.dump(coverage, open(P["coverage"], "w"), indent=1)
-    manifest["build"] = {"run_id": RUN_ID, "sba": coverage["sba"], "texas": tx_stats, "pension": pstats}
-    save_manifest(manifest)
+    json.dump({"run_id": RUN_ID, "state": STATE, "sba": coverage["sba"], "registry": tx_stats, "pension": pstats},
+              open(P["build_manifest"], "w"), indent=1, sort_keys=True)
     append_csv(P["runs"], ["run_id", "sba_source_rows", "matching_loans", "business_groups", "new_ids", "ready", "review",
                            "closed", "tracker_rows", "sba_sha256"],
                [{"run_id": RUN_ID, "sba_source_rows": sba_stats["source_data_rows"], "matching_loans": len(loans),
@@ -1350,18 +1392,27 @@ def render_results(rows, cov):
     cur = [r for r in rows if r.get("in_current_source") == "yes"]
     ready = [r for r in cur if r["eligibility_status"] == "ready"]
     conf_rank = {"high": 0, "medium": 1}
-    ready.sort(key=lambda r: (conf_rank.get(r["tx_match_confidence"], 2), r["pension_status"] != "filing found",
+    ready.sort(key=lambda r: (conf_rank.get(r["reg_match_confidence"], 2), r["pension_status"] != "filing found",
                               -int(r["record_age_years"]), r["biz_id"]))
-    show = ready[:5]
     _, plans = read_csv(P["plans"])
     plans_by = defaultdict(list)
     for p in plans:
         if not p["match_confidence"].startswith("low"):
             plans_by[p["biz_id"]].append(p)
+    if ready:
+        show, showing_ready = ready[:5], True
+    else:
+        def largest(r):
+            v = str(r["pension_largest_single_plan_active_participants"])
+            return -int(v) if v.isdigit() else 0
+        review = [r for r in cur if r["eligibility_status"] == "review"]
+        review.sort(key=lambda r: (r["pension_status"] != "filing found", largest(r), r["biz_id"]))
+        show, showing_ready = review[:5], False
     _, unav = read_csv(P["unavailable"])
-    sba, tx, pen = cov["sba"], cov["texas"], cov["pension"]
+    sba, tx, pen = cov["sba"], cov["registry"], cov["pension"]
     sba_url = sba["source_url"]
     tx_url = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["record_url"]
+    st_name, reg = PROFILE["state_name"], PROFILE.get("registry_label", "state registry")
     cards = []
     for r in show:
         pl = plans_by.get(r["biz_id"], [])
@@ -1374,12 +1425,12 @@ def render_results(rows, cov):
         cards.append(f"""
 <div class="card">
  <h3>{esc(r['biz_id'])} &middot; {esc(r['legal_name'])}</h3>
- <p class="muted">{esc(r['address'])}, {esc(r['city'])}, TX {esc(r['zip5'])}{(' &middot; DBA ' + esc(r['dba_names'])) if r['dba_names'] else ''}</p>
+ <p class="muted">{esc(r['address'])}, {esc(r['city'])}, {esc(STATE)} {esc(r['zip5'])}{(' &middot; DBA ' + esc(r['dba_names'])) if r['dba_names'] else ''}</p>
  <table>
+  <tr><th>Status</th><td><b>{esc(r['eligibility_status'])}</b>: {esc(r['eligibility_reason'])}</td></tr>
   <tr><th>PPP loans</th><td>{esc(r['draws'])}<br>{esc(r['loan_amounts_current'])}<br>{link(sba_url, 'SBA $150K+ CSV')} (search LoanNumber)</td></tr>
-  <tr><th>Texas record</th><td>{link(tx_url.format(id=r['tx_taxpayer_number']), r['tx_taxpayer_name'] + ' #' + r['tx_taxpayer_number'])}<br>
-     {esc(r['tx_match_confidence'])} match: {esc(r['tx_match_evidence'])}</td></tr>
-  <tr><th>Record date</th><td><b>{esc(r['record_date'])}</b> ({esc(r['record_age_years'])} years) &middot; {esc(r['record_date_meaning'])}</td></tr>
+  <tr><th>{esc(reg)}</th><td>{(link(tx_url.format(id=r['reg_record_id']), r['reg_record_name'] + ' #' + r['reg_record_id']) + '<br>' + esc(r['reg_match_confidence']) + ' match: ') if r['reg_record_id'] else ''}{esc(r['reg_match_evidence'])}</td></tr>
+  <tr><th>Record date</th><td><b>{esc(r['record_date'])}</b>{(' (' + esc(r['record_age_years']) + ' years) &middot; ' + esc(r['record_date_meaning'])) if r['record_date'] != 'unknown' else ''}</td></tr>
   <tr><th>Historical JobsReported</th><td>{esc(r['jobs_reported_by_loan'])}</td></tr>
   <tr><th>Payroll proxy (historical)</th><td>{esc(f"${int(r['historical_payroll_proxy_annual']):,} per year" if str(r['historical_payroll_proxy_annual']).isdigit() else r['historical_payroll_proxy_annual'])} &middot; {esc(r['payroll_proxy_basis'])}</td></tr>
   <tr><th>Retirement plans</th><td><ul>{plan_html}</ul></td></tr>
@@ -1388,7 +1439,7 @@ def render_results(rows, cov):
     def tbl(d):
         return "".join(f"<tr><td>{esc(k or '(blank)')}</td><td class='n'>{v:,}</td></tr>" for k, v in sorted(d.items(), key=lambda x: -x[1]))
     unknowns = {
-        "Record date unknown (no verified Texas charter date)": sum(1 for r in cur if r["record_age_30plus"] == "unknown"),
+        f"Record date unknown (no verified {reg} date)": sum(1 for r in cur if r["record_age_30plus"] == "unknown"),
         "No matched retirement-plan filing (pension unknown)": sum(1 for r in cur if r["pension_status"].startswith("unknown")),
         "Historical payroll proxy unknown": sum(1 for r in cur if r["historical_payroll_proxy_annual"] == "unknown"),
         "JobsReported blank on at least one loan": sum(1 for r in cur if "blank" in r["jobs_reported_by_loan"]),
@@ -1401,7 +1452,7 @@ def render_results(rows, cov):
                      for k, v in pen.get("files", {}).items())
     unav_html = "".join(f"<li><b>{esc(u['name'])}</b>: {esc(u['reason'])} {link(u['checked_url'], 'checked')}</li>" for u in unav)
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Off-market scout: TX plumbing/HVAC (NAICS 238220), PPP &ge; $150K</title>
+<title>Off-market scout: {esc(STATE)} plumbing/HVAC (NAICS 238220), PPP &ge; $150K</title>
 <style>
 body{{font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f5f6f8;color:#1d2330}}
 main{{max-width:1100px;margin:auto;padding:24px}} h1{{font-size:24px;margin:0 0 4px}} h2{{margin-top:32px;font-size:19px}}
@@ -1414,16 +1465,18 @@ th{{width:190px;color:#5d6675;font-weight:600}} td.n{{text-align:right;font-vari
 .warn{{background:#fff8e6;border-left:4px solid #e5a400;padding:10px 14px;border-radius:6px}} code{{font-size:12px}} ul{{margin:4px 0;padding-left:18px}}
 a{{color:#0b5bd3}} @media(max-width:760px){{.two{{grid-template-columns:1fr}}}}
 </style></head><body><main>
-<h1>Off-market scout: Texas plumbing &amp; HVAC contractors</h1>
-<p class="muted">NAICS 238220 &middot; BorrowerState=TX &middot; PPP CurrentApprovalAmount &ge; $150,000 &middot; run {esc(cov['run_id'])} &middot; ages as of {esc(cov['as_of_date'])}</p>
-<div class="warn">Record age is the age of a Texas registration record. It does not establish owner age or intent to sell.
+<p class="muted">{' &middot; '.join(link('../' + s.lower() + '/results.html', CFG['states'][s]['state_name']) if s != STATE else '<b>' + esc(CFG['states'][s]['state_name']) + '</b>' for s in CFG['states'])}</p>
+<h1>Off-market scout: {esc(st_name)} plumbing &amp; HVAC contractors</h1>
+<p class="muted">NAICS 238220 &middot; BorrowerState={esc(STATE)} &middot; PPP CurrentApprovalAmount &ge; $150,000 &middot; run {esc(cov['run_id'])} &middot; ages as of {esc(cov['as_of_date'])}</p>
+{'' if tx.get('available') else '<div class="warn" style="margin-bottom:10px;border-color:#c0392b;background:#fdecea"><b>No registration source available for ' + esc(st_name) + '.</b> ' + esc(tx.get('note', '')) + '</div>'}
+<div class="warn">Record age is the age of a state registration record. It does not establish owner age or intent to sell.
 Retirement-plan participants are not current company headcount. JobsReported is historical (2020&ndash;2021). Revenue and purchase price are never inferred.</div>
 
 <h2>Stage counts</h2>
 <div class="grid">
  <div class="stat"><b>{sba['source_data_rows']:,}</b>SBA source rows</div>
- <div class="stat"><b>{sba['rows_borrower_state_tx']:,}</b>BorrowerState = TX</div>
- <div class="stat"><b>{sba['rows_tx_naics_238220']:,}</b>&hellip; and NAICS 238220</div>
+ <div class="stat"><b>{sba['rows_borrower_state_match']:,}</b>BorrowerState = {esc(STATE)}</div>
+ <div class="stat"><b>{sba['rows_state_naics']:,}</b>&hellip; and NAICS 238220</div>
  <div class="stat"><b>{sba['matching_unique_loans']:,}</b>matching loans (&ge; $150K)</div>
  <div class="stat"><b>{cov['business_groups']:,}</b>business groups</div>
  <div class="stat"><b>{cov['eligibility_status'].get('ready', 0):,}</b>ready</div>
@@ -1431,15 +1484,16 @@ Retirement-plan participants are not current company headcount. JobsReported is 
  <div class="stat"><b>{cov['eligibility_status'].get('closed', 0):,}</b>closed</div>
 </div>
 <div class="two" style="margin-top:16px">
- <div class="box"><b>Texas registration join</b><table>{tbl(cov['texas_match_status'])}</table>
+ <div class="box"><b>{esc(reg)} join</b><table>{tbl(cov['registry_match_status'])}</table>
    <b>Record aged 30+ years</b><table>{tbl(cov['record_age_30plus'])}</table></div>
  <div class="box"><b>Retirement-plan filings</b><table>{tbl(cov['pension_status'])}</table>
    <b>Review queue rows by stage</b><table>{tbl(cov['review_queue_by_stage'])}</table></div>
 </div>
 
-<h2>Five ready businesses</h2>
-<p class="muted">{len(ready):,} businesses are <b>ready</b> (verified Texas record dated 30+ years ago). Shown: highest-confidence matches first, then those with a matched retirement-plan filing.</p>
-{''.join(cards) or '<p>No ready businesses in this run.</p>'}
+{f'''<h2>Five ready businesses</h2>
+<p class="muted">{len(ready):,} businesses are <b>ready</b> (verified {esc(reg)} record dated 30+ years ago). Shown: highest-confidence matches first, then those with a matched retirement-plan filing.</p>''' if showing_ready else f'''<h2>Ready businesses: none</h2>
+<p class="muted"><b>0</b> businesses are ready because no {esc(st_name)} registration or original trade-license date could be verified. The five below are <b>review</b> records with the strongest other evidence (matched retirement-plan filings, largest single plan first). They are <b>not</b> ready.</p>'''}
+{''.join(cards) or '<p>No businesses to show.</p>'}
 
 <h2>Unknowns</h2>
 <div class="box"><table>{unk_html}</table></div>
@@ -1449,9 +1503,9 @@ Retirement-plan participants are not current company headcount. JobsReported is 
 <tr><th>SBA PPP $150K+</th><td>{link(sba_url, os.path.basename(sba_url))} &middot; data as of {esc(sba['data_as_of'])} &middot; {sba['bytes']:,} bytes &middot; sha256 <code>{esc(sba['sha256'])}</code><br>
  encoding: {esc(sba['encoding_detected'])} ({sba['lines_decoded_cp1252_fallback']:,} cp1252-fallback lines) &middot; {sba['physical_lines']:,} physical lines &middot; {sba['source_data_rows']:,} data rows &middot;
  {sba.get('rows_wrong_field_count', 0):,} malformed rows &middot; {sba['duplicate_loan_numbers_in_matches']} duplicate loan numbers &middot;
- {sba['excluded_blank_borrowerstate_but_projectstate_tx']} loans with blank BorrowerState but ProjectState=TX (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
-<tr><th>Texas franchise (9cir-efmm)</th><td>{link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers')} &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated {esc(tx.get('dataset_rows_updated_at', '')[:10])} &middot; sha256 <code>{esc(tx.get('sha256', ''))}</code></td></tr>
-<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known from Texas taxpayer numbers: {pen.get('eins_known_from_texas', 0):,}
+ {sba['excluded_blank_borrowerstate_but_projectstate_match']} loans with blank BorrowerState but ProjectState={esc(STATE)} (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
+<tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated " + esc(tx.get('dataset_rows_updated_at', '')[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
+<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
  <table><tr><th>file</th><th>rows</th><th>candidates</th><th>encoding</th><th>sha256</th></tr>{pfiles}</table></td></tr>
 </table></div>
 
@@ -1459,7 +1513,7 @@ Retirement-plan participants are not current company headcount. JobsReported is 
 <div class="box"><ul>{unav_html}</ul></div>
 <p class="muted">Files: {link('scout-tracker.csv', 'scout-tracker.csv')} &middot; {link('data/source_ledger.csv', 'source ledger')} &middot;
 {link('data/review_queue.csv', 'review queue')} &middot; {link('data/loans.csv', 'loans')} &middot; {link('data/pension_plans.csv', 'pension plans')} &middot;
-{link('data/coverage_report.json', 'coverage report')} &middot; {link('data/download_log.csv', 'download log')} &middot; {link('SCOUT.md', 'runbook')}</p>
+{link('data/coverage_report.json', 'coverage report')} &middot; {link('../../data/download_log.csv', 'download log')} &middot; {link('../../SCOUT.md', 'runbook')}</p>
 </main></body></html>"""
     open(RESULTS, "w", encoding="utf-8").write(page)
 
@@ -1488,9 +1542,9 @@ def cmd_verify():
     check("every matching source loan stored once", len(cur_loans) == cov["sba"]["matching_unique_loans"],
           f"{len(cur_loans)} vs {cov['sba']['matching_unique_loans']}")
     check("matching rows = unique loans + duplicates",
-          cov["sba"]["rows_tx_naics_amount_ge_150k"] == cov["sba"]["matching_unique_loans"] + cov["sba"]["duplicate_loan_numbers_in_matches"])
+          cov["sba"]["rows_state_naics_amount_ge_150k"] == cov["sba"]["matching_unique_loans"] + cov["sba"]["duplicate_loan_numbers_in_matches"])
     check("NAICS rows = >=150K + <150K",
-          cov["sba"]["rows_tx_naics_238220"] == cov["sba"]["rows_tx_naics_amount_ge_150k"] + cov["sba"].get("rows_tx_naics_amount_lt_150k", 0))
+          cov["sba"]["rows_state_naics"] == cov["sba"]["rows_state_naics_amount_ge_150k"] + cov["sba"].get("rows_state_naics_amount_lt_150k", 0))
     tr_ids = set(ids)
     check("every loan maps to a tracker business", all(r["biz_id"] in tr_ids for r in loans))
     loan_count = Counter(r["biz_id"] for r in cur_loans)
@@ -1506,17 +1560,17 @@ def cmd_verify():
     check("ledger rows have URL + retrieval date + sha256", all(r["url"] and r["retrieved_date"] and r["source_sha256"] for r in ledger))
     check("eligibility values valid", all(r["eligibility_status"] in ("ready", "review", "closed") for r in cur_biz))
     check("ready => verified TX + 30+ years",
-          all(r["tx_match_status"] == "verified" and r["record_age_30plus"] == "yes" for r in cur_biz if r["eligibility_status"] == "ready"))
+          all(r["reg_match_status"] == "verified" and r["record_age_30plus"] == "yes" for r in cur_biz if r["eligibility_status"] == "ready"))
     _, cands = read_csv(P["tx_candidates"])
     conflict = {c["biz_id"] for c in cands if c["selected"] and c["suffix_conflict"] == "True"}
     check("entity-type conflicts never ready/closed",
           all(r["eligibility_status"] == "review" for r in cur_biz if r["biz_id"] in conflict), f"{len(conflict)} conflicts")
     check("closed => verified TX record under threshold",
-          all(r["tx_match_status"] == "verified" and r["record_age_30plus"] == "no" for r in cur_biz if r["eligibility_status"] == "closed"))
+          all(r["reg_match_status"] == "verified" and r["record_age_30plus"] == "no" for r in cur_biz if r["eligibility_status"] == "closed"))
     check("outreach ready only where eligibility ready at ID creation",
           all(r["eligibility_status"] == "ready" for r in cur_biz if r.get("outreach_status") == "ready" and r["first_seen_run"] == r["last_seen_run"]))
     check("verified TX joins have name + address/ZIP corroboration",
-          all(r["tx_match_confidence"] in ("high", "medium") and ("corroborat" in r["tx_match_evidence"]) for r in cur_biz if r["tx_match_status"] == "verified"))
+          all(r["reg_match_confidence"] in ("high", "medium") and ("corroborat" in r["reg_match_evidence"]) for r in cur_biz if r["reg_match_status"] == "verified"))
     check("payroll proxy only on corporations with documented basis",
           all(r["historical_payroll_proxy_annual"] == "unknown" or "/ 2.5 x 12" in r["payroll_proxy_basis"] for r in cur_biz))
     _, plans = read_csv(P["plans"])
