@@ -1,0 +1,61 @@
+{
+  "target": {
+    "borrower_state": "TX",
+    "naics_code": "238220",
+    "naics_label": "Plumbing, Heating, and Air-Conditioning Contractors",
+    "min_current_approval_amount": 150000
+  },
+  "age_threshold_years": 30,
+  "id_prefix": "biz-",
+  "id_width": 3,
+  "sources": {
+    "SBA_PPP_150K_PLUS": {
+      "name": "SBA PPP FOIA - loans $150K and above",
+      "dataset_page": "https://data.sba.gov/dataset/ppp-foia",
+      "url_pattern": "public_150k_plus_[0-9]{6}\\.csv",
+      "fallback_url": "https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv",
+      "raw_file": "sba_public_150k_plus.csv"
+    },
+    "TX_FRANCHISE_9CIR_EFMM": {
+      "name": "Texas Comptroller - Active Franchise Taxpayers (9cir-efmm)",
+      "dataset_page": "https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm",
+      "metadata_url": "https://data.texas.gov/api/views/9cir-efmm.json",
+      "url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD",
+      "record_url": "https://data.texas.gov/resource/9cir-efmm.json?taxpayer_number={id}",
+      "raw_file": "tx_active_franchise_taxpayers.csv"
+    },
+    "DOL_FORM_5500": {
+      "name": "DOL EBSA Form 5500 dataset (Latest)",
+      "dataset_page": "https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets",
+      "url_template": "https://askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_{year}_Latest.zip",
+      "raw_file_template": "F_5500_{year}_Latest.zip"
+    },
+    "DOL_FORM_5500_SF": {
+      "name": "DOL EBSA Form 5500-SF dataset (Latest)",
+      "dataset_page": "https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets",
+      "url_template": "https://askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_SF_{year}_Latest.zip",
+      "raw_file_template": "F_5500_SF_{year}_Latest.zip"
+    }
+  },
+  "dol_plan_years": "auto-latest-2",
+  "known_unavailable_sources": [
+    {
+      "source_id": "TX_TRADE_LICENSE_ORIGINAL_DATES",
+      "name": "Original issue dates for Texas HVAC (TDLR) and plumbing (TSBPE) licenses",
+      "checked_url": "https://data.texas.gov/resource/7358-krk7.json",
+      "reason": "TDLR 'All Licenses' (7358-krk7) publishes license number, holder and expiration date only; no original issue date. TSBPE publishes no bulk open dataset with original license dates. Trade-license dates are therefore never used; SOS charter/COA dates are the only record dates."
+    },
+    {
+      "source_id": "TX_SOS_FILINGS_DIRECT",
+      "name": "Texas SOS filing history (SOSDirect)",
+      "checked_url": "https://www.sos.state.tx.us/corp/sosda/index.shtml",
+      "reason": "Paid, login-only per-entity search; no bulk open access. Conversion/merger history that can reset a charter date is not checked."
+    },
+    {
+      "source_id": "SBA_PPP_PER_LOAN_PAGE",
+      "name": "Per-loan web page on data.sba.gov",
+      "checked_url": "https://data.sba.gov/dataset/ppp-foia",
+      "reason": "SBA publishes only bulk CSVs; loan evidence links point to the CSV plus the LoanNumber."
+    }
+  ]
+}
