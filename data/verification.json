@@ -1,5 +1,5 @@
 {
- "run_id": "20261007T195659Z",
+ "run_id": "20261007T200653Z",
  "passed": true,
  "checks": [
   {
@@ -74,6 +74,21 @@
   },
   {
    "check": "ready => verified TX + 30+ years",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "entity-type conflicts never ready/closed",
+   "ok": true,
+   "detail": "19 conflicts"
+  },
+  {
+   "check": "closed => verified TX record under threshold",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "check": "outreach ready only where eligibility ready at ID creation",
    "ok": true,
    "detail": ""
   },

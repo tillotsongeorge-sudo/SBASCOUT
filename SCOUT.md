@@ -76,12 +76,23 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    that vanish from the source stay in the tracker with `in_current_source=no`.
 5. **Texas registration (9cir-efmm).** Candidates come from an equal normalized name (legal name or
    documented DBA) or an equal street+ZIP with a similar name.
-   - `high`: the legal name matches **and** the street address matches
-   - `medium`: the legal name matches and only the ZIP matches, **or** a documented DBA matches and
-     the street matches
-   - `low`: the name matches with no street/ZIP corroboration, or the address matches with only a
-     similar name. These go to review.
-   - Exactly one top `high`/`medium` candidate gives `verified`. Ties give `review`.
+   - `high`: the legal name matches (entity suffix ignored) **and** the street address (or house
+     number + street) and ZIP match
+   - `medium`, any one of:
+     - the exact legal name *including the suffix* matches, and the ZIP matches
+     - the exact legal name matches, the city matches, and it is the only active Texas record with
+       that name statewide
+     - a documented DBA matches, and the street matches
+     - a DOL filing ties a name-only candidate to the PPP borrower. The sponsor EIN must equal the
+       FEIN inside the Texas taxpayer number, the sponsor name must equal the Texas name, and the
+       sponsor address must equal the PPP address.
+   - `low`: anything else. This includes a name match without corroboration, or the same address
+     with only a similar name. These go to review.
+   - Exactly one top `high`/`medium` candidate gives `verified`. Among tied candidates, the one
+     whose exact suffix matches wins. Remaining ties go to `review`.
+   - If the verified record's entity type differs from the PPP borrower's, such as PPP `INC` vs
+     Texas `LLC`, it is flagged `suffix_conflict` and goes to review. A conversion or successor
+     entity can carry a younger charter date than the business itself.
 
    **Record date** is the `SOS Charter Date`. Its meaning depends on the record type and is saved per
    business:
@@ -99,7 +110,9 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    - or the sponsor name / DBA name equal to the business legal name or DBA.
 
    Confidence: `high` when the EIN and name agree, or the name and street agree. `medium` when the
-   name and ZIP agree, or the EIN and address agree. `low` goes to review and is never used.
+   name and ZIP agree, or the EIN and address agree. `low` goes to review and is never used. An
+   uncertain pension join only puts that plan in review. It never changes `eligibility_status`,
+   because pensions are informational, not an eligibility test.
 
    Rows must have a retirement benefit code, meaning a `TYPE_PENSION_BNFT_CODE` code starting with
    `1` (defined benefit) or `2` (defined contribution). Welfare-only plans and DFE filings are
@@ -124,8 +137,9 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    - `ready`: a verified Texas join with a record dated 30+ years ago
    - `closed`: a verified Texas join with a record under 30 years, the clear exclusion with current
      evidence
-   - `review`: everything uncertain, including ambiguous joins, name-only matches, no Texas match
-     (for example sole proprietors, who don't file franchise tax), or no charter date
+   - `review`: everything uncertain, including ambiguous joins, name-only matches, entity-type
+     conflicts, no Texas match (for example sole proprietors, who don't file franchise tax), or no
+     charter date
 9. **Outreach.** `outreach_status` is set **only when an ID is created**: `ready` if the business is
    eligibility-ready, `not_ready` otherwise. On every rerun, outreach_status, scores, notes, and any
    column this pipeline does not own are copied back unchanged.

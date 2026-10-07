@@ -708,9 +708,9 @@ def stage_texas(groups, manifest):
         cities = {k["city"] for k in g["ids"]}
         ppp_suffixes = {suffix_of(k["legal_raw"]) for k in g["ids"]} - {""}
         seen, cands = set(), []
-        pool = [(r, "legal") for c in cores for r in by_name.get(c, [])] + \
-               [(r, "dba") for c in dbas for r in by_name.get(c, [])] + \
-               [(r, "address") for s in streets_g for r in by_street.get(s, [])]
+        pool = [(r, "legal") for c in sorted(cores) for r in by_name.get(c, [])] + \
+               [(r, "dba") for c in sorted(dbas) for r in by_name.get(c, [])] + \
+               [(r, "address") for s in sorted(streets_g) for r in by_street.get(s, [])]
         for r, via in pool:
             if r["taxpayer_number"] in seen:
                 continue
@@ -990,8 +990,10 @@ def match_pension(groups, tx_results, hits, stats):
             if cur is None or (rec["plan_year_begin"], rec["filing_date_received"]) > (cur["plan_year_begin"], cur["filing_date_received"]):
                 per_biz[bid]["plans"][plan_id] = rec
     rows = []
-    for bid, d in per_biz.items():
+    for bid in sorted(per_biz):
+        d = per_biz[bid]
         rows.extend(sorted(d["plans"].values(), key=lambda r: r["plan_id"]))
+        d["review"].sort(key=lambda r: (r["plan_id"], r["ack_id"]))
         for r in d["review"]:
             rows.append({**r, "match_confidence": "low (review)"})
     write_csv(P["plans"], ["biz_id", "plan_id", "match_confidence", "match_evidence", "form", "dataset_year", "ack_id",
@@ -1379,7 +1381,7 @@ def render_results(rows, cov):
      {esc(r['tx_match_confidence'])} match: {esc(r['tx_match_evidence'])}</td></tr>
   <tr><th>Record date</th><td><b>{esc(r['record_date'])}</b> ({esc(r['record_age_years'])} years) &middot; {esc(r['record_date_meaning'])}</td></tr>
   <tr><th>Historical JobsReported</th><td>{esc(r['jobs_reported_by_loan'])}</td></tr>
-  <tr><th>Payroll proxy (historical)</th><td>{esc(r['historical_payroll_proxy_annual'])} &middot; {esc(r['payroll_proxy_basis'])}</td></tr>
+  <tr><th>Payroll proxy (historical)</th><td>{esc(f"${int(r['historical_payroll_proxy_annual']):,} per year" if str(r['historical_payroll_proxy_annual']).isdigit() else r['historical_payroll_proxy_annual'])} &middot; {esc(r['payroll_proxy_basis'])}</td></tr>
   <tr><th>Retirement plans</th><td><ul>{plan_html}</ul></td></tr>
  </table>
 </div>""")
@@ -1505,6 +1507,14 @@ def cmd_verify():
     check("eligibility values valid", all(r["eligibility_status"] in ("ready", "review", "closed") for r in cur_biz))
     check("ready => verified TX + 30+ years",
           all(r["tx_match_status"] == "verified" and r["record_age_30plus"] == "yes" for r in cur_biz if r["eligibility_status"] == "ready"))
+    _, cands = read_csv(P["tx_candidates"])
+    conflict = {c["biz_id"] for c in cands if c["selected"] and c["suffix_conflict"] == "True"}
+    check("entity-type conflicts never ready/closed",
+          all(r["eligibility_status"] == "review" for r in cur_biz if r["biz_id"] in conflict), f"{len(conflict)} conflicts")
+    check("closed => verified TX record under threshold",
+          all(r["tx_match_status"] == "verified" and r["record_age_30plus"] == "no" for r in cur_biz if r["eligibility_status"] == "closed"))
+    check("outreach ready only where eligibility ready at ID creation",
+          all(r["eligibility_status"] == "ready" for r in cur_biz if r.get("outreach_status") == "ready" and r["first_seen_run"] == r["last_seen_run"]))
     check("verified TX joins have name + address/ZIP corroboration",
           all(r["tx_match_confidence"] in ("high", "medium") and ("corroborat" in r["tx_match_evidence"]) for r in cur_biz if r["tx_match_status"] == "verified"))
     check("payroll proxy only on corporations with documented basis",
