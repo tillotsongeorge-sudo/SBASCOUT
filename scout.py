@@ -259,18 +259,44 @@ def discover_sba_url():
 
 
 def discover_dol_years():
+    """Two newest plan years that publish both Form 5500 and 5500-SF Latest zips.
+
+    The DOL HTML catalog often returns HTTP 403 from this network. When it does,
+    probe the zip URLs directly (2026 was 404 on 2026-10-12; 2024 and 2025 were live).
+    """
     s = CFG["sources"]["DOL_FORM_5500"]
+    note = "dataset page"
+    years = []
     try:
         page = http_get(s["dataset_page"]).read().decode("utf-8", "replace")
-        years = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
-        sf_years = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
-        years = [y for y in years if y in sf_years]
-        if years:
-            return years[-2:]
-    except Exception:  # noqa: BLE001
-        pass
-    y = TODAY.year - 1
-    return [y - 1, y]
+        y5500 = {int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)}
+        ysf = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
+        years = sorted(y5500 & ysf)
+    except Exception as e:  # noqa: BLE001
+        note = f"dataset page unreachable ({type(e).__name__}: {e}); probed Latest zip URLs"
+        log(note)
+    if not years:
+        found = []
+        for y in range(TODAY.year, TODAY.year - 6, -1):
+            ok_both = True
+            for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+                info = head_info(CFG["sources"][sid]["url_template"].format(year=y))
+                if info.get("status") != 200:
+                    ok_both = False
+                    break
+            if ok_both:
+                found.append(y)
+            if len(found) == 2:
+                break
+        years = sorted(found)
+        if years and note == "dataset page":
+            note = "pattern not found on dataset page; probed Latest zip URLs"
+    if not years:
+        y = TODAY.year - 1
+        years = [y - 1, y]
+        note = "no years discovered; calendar fallback " + str(years)
+    log(f"DOL plan years {years[-2:]} ({note})")
+    return years[-2:], note
 
 
 def cmd_fetch(force=False):
@@ -293,7 +319,7 @@ def cmd_fetch(force=False):
         fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
         if fetched["TX_FRANCHISE_9CIR_EFMM"]:
             fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
-    years = discover_dol_years()
+    years, dol_how = discover_dol_years()
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
         for y in years:
@@ -305,7 +331,7 @@ def cmd_fetch(force=False):
     files = (manifest.get("fetch") or {}).get("files") or {}
     files.update({k: v for k, v in fetched.items() if v})
     manifest.pop("build", None)
-    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": files}
+    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "dol_year_discovery": dol_how, "files": files}
     save_manifest(manifest)
     return manifest
 
@@ -1337,6 +1363,7 @@ def cmd_build():
         tx_stats = {"available": False, "note": note}
     TX_STATS.update(tx_stats)
     hits, pstats = scan_dol(groups, tx_results, manifest)
+    pstats["year_discovery"] = (manifest.get("fetch") or {}).get("dol_year_discovery", "")
     if tx_stats.get("available"):
         tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
     pension, pstats = match_pension(groups, tx_results, hits, pstats)
@@ -1505,7 +1532,7 @@ Retirement-plan participants are not current company headcount. JobsReported is 
  {sba.get('rows_wrong_field_count', 0):,} malformed rows &middot; {sba['duplicate_loan_numbers_in_matches']} duplicate loan numbers &middot;
  {sba['excluded_blank_borrowerstate_but_projectstate_match']} loans with blank BorrowerState but ProjectState={esc(STATE)} (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
 <tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated " + esc(tx.get('dataset_rows_updated_at', '')[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
-<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
+<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; year discovery: {esc(pen.get('year_discovery') or 'dataset page')} &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
  <table><tr><th>file</th><th>rows</th><th>candidates</th><th>encoding</th><th>sha256</th></tr>{pfiles}</table></td></tr>
 </table></div>
 

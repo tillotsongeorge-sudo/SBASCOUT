@@ -72,7 +72,7 @@ describe it.
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
 | `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
-| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
+| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. If that HTML catalog returns 403 (Akamai), the scout probes the Latest zip URLs instead and keeps the two newest years where both files exist. As of 2026-10-12 that is 2024 and 2025; 2026 returns 404. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
 git-ignored because of their size. Every fetch appends to `data/download_log.csv` with the URL,
@@ -229,6 +229,9 @@ All paths below are relative to `states/<state>/`, except `data/download_log.csv
   linked record.
 - **The newest DOL plan year is partial** because filings lag up to about 9.5 months after year end.
   The previous year is searched too, and the newest filing per plan is kept.
+- **The DOL HTML catalog page can return HTTP 403** from some networks. The zip files on
+  `askebsa.dol.gov` are still downloaded. Year discovery then probes those URLs. A blocked catalog
+  page is not logged as a missing pension source when the zips download.
 - **None of these sources says anything about owner age, retirement, or intent to sell.**
 
 ## 6. Rerun checklist

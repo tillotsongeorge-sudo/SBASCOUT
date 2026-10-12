@@ -1,5 +1,5 @@
 {
- "run_id": "20261007T203102Z",
+ "run_id": "20261012T131626Z",
  "passed": true,
  "checks": [
   {
@@ -55,7 +55,7 @@
   {
    "check": "ledger has no duplicate evidence rows",
    "ok": true,
-   "detail": "2080 rows"
+   "detail": "2081 rows"
   },
   {
    "check": "every current loan has a ledger row",
