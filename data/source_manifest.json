@@ -4,6 +4,7 @@
    2024,
    2025
   ],
+  "dol_year_discovery": "DOL dataset page unreachable (HTTP Error 403: Forbidden); probed askebsa zip URLs for [2026, 2025, 2024], using [2024, 2025]",
   "files": {
    "DOL_FORM_5500_2024": {
     "bytes": 28642573,
@@ -12,7 +13,7 @@
     "http_status": 200,
     "last_modified": "Wed, 30 Sep 2026 16:19:00 GMT",
     "plan_year": 2024,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
     "sha256": "8884391d48a9e362fd7d2b91d6e37430bd2e54355c9dbc3479985c9d876872f8",
     "source_id": "DOL_FORM_5500_2024",
     "url": "https://askebsa.dol.gov/FOIA%20Files/2024/Latest/F_5500_2024_Latest.zip"
@@ -24,7 +25,7 @@
     "http_status": 200,
     "last_modified": "Wed, 30 Sep 2026 16:19:03 GMT",
     "plan_year": 2025,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
     "sha256": "9f6245cdcbb86ae167af4595bb3dba4fbf7845df98f4ccd6748aa98fa2a4e582",
     "source_id": "DOL_FORM_5500_2025",
     "url": "https://askebsa.dol.gov/FOIA%20Files/2025/Latest/F_5500_2025_Latest.zip"
@@ -36,7 +37,7 @@
     "http_status": 200,
     "last_modified": "Wed, 30 Sep 2026 16:25:02 GMT",
     "plan_year": 2024,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
     "sha256": "11370908e2bbc78d1d418b2f2a2177875e0524c12b69a181432d6fd65a5966c3",
     "source_id": "DOL_FORM_5500_SF_2024",
     "url": "https://askebsa.dol.gov/FOIA%20Files/2024/Latest/F_5500_SF_2024_Latest.zip"
@@ -48,7 +49,7 @@
     "http_status": 200,
     "last_modified": "Wed, 30 Sep 2026 16:25:26 GMT",
     "plan_year": 2025,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
     "sha256": "2db4677bd93455ccc082d378fdd56594ac90ca0fc6f2da1639a15aea8ed3e94d",
     "source_id": "DOL_FORM_5500_SF_2025",
     "url": "https://askebsa.dol.gov/FOIA%20Files/2025/Latest/F_5500_SF_2025_Latest.zip"
@@ -60,27 +61,27 @@
     "final_url": "https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv",
     "http_status": 200,
     "last_modified": "Fri, 26 Jun 2026 21:39:45 GMT",
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
     "sha256": "3760a581dc3fd7ca12d09996aa360d749e075bcac517e5a6f7e92ae447a1cb8c",
     "source_id": "SBA_PPP_150K_PLUS",
     "url": "https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv"
    },
    "TX_FRANCHISE_9CIR_EFMM": {
-    "bytes": 469377711,
+    "bytes": 469790155,
     "dataset_metadata": {
      "attribution": "Texas Comptroller of Public Accounts",
-     "rows_updated_at": "2026-10-03T08:44:55+00:00"
+     "rows_updated_at": "2026-10-17T10:35:29+00:00"
     },
-    "etag": "W/\"Z29sZi4xODE1XzFfNTAyTHFoSWs3bWV5VGVLNV8xNTI5aTdDT25BNEc0---gzipkLaA-WpNRpFNWQiT2VIJduUsQh4--gzip--gzip\"",
+    "etag": "W/\"Z29sZi4xODE1XzFfNTA0THFoSWs3bWV5VGVLNV8xNTI5aTdDT25BNEc0---gzipkLaA-WpNRpFNWQiT2VIJduUsQh4--gzip--gzip\"",
     "final_url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD",
     "http_status": 200,
-    "last_modified": "Sat, 03 Oct 2026 08:40:57 GMT",
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-    "sha256": "d729e973bf0dd232fc355fff82b6d03d9116cfb1749d75b2d8ae6e3756e91249",
+    "last_modified": "Sat, 17 Oct 2026 10:35:22 GMT",
+    "retrieved_at_utc": "2026-10-19T13:05:17+00:00",
+    "sha256": "53f810f634a7ea27d0ba9a3b1d8904ac01aa59ac5ca560283c06e86f55b22dda",
     "source_id": "TX_FRANCHISE_9CIR_EFMM",
     "url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD"
    }
   },
-  "run_id": "20261007T202838Z"
+  "run_id": "20261019T132134Z"
  }
 }
