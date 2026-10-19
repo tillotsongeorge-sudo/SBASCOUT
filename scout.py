@@ -258,19 +258,49 @@ def discover_sba_url():
     return s["fallback_url"], "pattern not found on dataset page; using configured URL"
 
 
+def _dol_year_published(year):
+    """Both Latest zips must answer HTTP 200. urllib follows the askebsa 301 to www."""
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        url = CFG["sources"][sid]["url_template"].format(year=year)
+        info = head_info(url)
+        if info.get("status") != 200:
+            return False
+    return True
+
+
 def discover_dol_years():
+    """Return (years, note) for the two newest plan years with both 5500 and 5500-SF files.
+
+    The DOL HTML catalog often returns HTTP 403. When it does, probe the known zip URLs
+    from this calendar year backward. A missing year is not a failure of the businesses.
+    """
     s = CFG["sources"]["DOL_FORM_5500"]
+    note = ""
     try:
-        page = http_get(s["dataset_page"]).read().decode("utf-8", "replace")
+        with http_get(s["dataset_page"]) as resp:
+            page = resp.read().decode("utf-8", "replace")
+            status = resp.status
         years = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
         sf_years = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
         years = [y for y in years if y in sf_years]
         if years:
-            return years[-2:]
-    except Exception:  # noqa: BLE001
-        pass
+            return years[-2:], f"discovered on DOL dataset page (HTTP {status})"
+        note = f"dataset page HTTP {status} contained no Latest zip links"
+    except Exception as e:  # noqa: BLE001
+        note = f"DOL dataset page unreachable ({e})"
+    found = []
+    probed = []
+    for y in range(TODAY.year, TODAY.year - 5, -1):
+        probed.append(y)
+        if _dol_year_published(y):
+            found.append(y)
+        if len(found) == 2:
+            break
+    found.sort()
+    if len(found) >= 1:
+        return found, f"{note}; probed askebsa zip URLs for {probed}, using {found}"
     y = TODAY.year - 1
-    return [y - 1, y]
+    return [y - 1, y], f"{note}; probe of {probed} found no published years, falling back to {[y - 1, y]}"
 
 
 def cmd_fetch(force=False):
@@ -293,7 +323,8 @@ def cmd_fetch(force=False):
         fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
         if fetched["TX_FRANCHISE_9CIR_EFMM"]:
             fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
-    years = discover_dol_years()
+    years, year_note = discover_dol_years()
+    log(f"DOL plan years {years}: {year_note}")
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
         for y in years:
@@ -305,7 +336,7 @@ def cmd_fetch(force=False):
     files = (manifest.get("fetch") or {}).get("files") or {}
     files.update({k: v for k, v in fetched.items() if v})
     manifest.pop("build", None)
-    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": files}
+    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "dol_year_discovery": year_note, "files": files}
     save_manifest(manifest)
     return manifest
 
@@ -1337,6 +1368,7 @@ def cmd_build():
         tx_stats = {"available": False, "note": note}
     TX_STATS.update(tx_stats)
     hits, pstats = scan_dol(groups, tx_results, manifest)
+    pstats["year_discovery"] = (manifest.get("fetch") or {}).get("dol_year_discovery", "")
     if tx_stats.get("available"):
         tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
     pension, pstats = match_pension(groups, tx_results, hits, pstats)
@@ -1505,7 +1537,7 @@ Retirement-plan participants are not current company headcount. JobsReported is 
  {sba.get('rows_wrong_field_count', 0):,} malformed rows &middot; {sba['duplicate_loan_numbers_in_matches']} duplicate loan numbers &middot;
  {sba['excluded_blank_borrowerstate_but_projectstate_match']} loans with blank BorrowerState but ProjectState={esc(STATE)} (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
 <tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated " + esc(tx.get('dataset_rows_updated_at', '')[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
-<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
+<tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; {esc(pen.get('year_discovery', ''))} &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
  <table><tr><th>file</th><th>rows</th><th>candidates</th><th>encoding</th><th>sha256</th></tr>{pfiles}</table></td></tr>
 </table></div>
 
