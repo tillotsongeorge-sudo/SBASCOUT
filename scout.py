@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
@@ -218,32 +219,51 @@ def download(source_id, url, dest, force=False):
             append_csv(P["download_log"], LOG_FIELDS, [row])
             log(f"{source_id}: using cached {os.path.basename(dest)} ({row['action']})")
             return meta
-    log(f"{source_id}: downloading {url}")
-    h = hashlib.sha256()
-    n = 0
     part = dest + ".part"
-    with http_get(url, timeout=300) as r, open(part, "wb") as f:
-        status = r.status
-        final_url = r.geturl()
-        etag = r.headers.get("ETag", "") or head.get("etag", "")
-        lm = r.headers.get("Last-Modified", "") or head.get("last_modified", "")
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            h.update(chunk)
-            f.write(chunk)
-            n += len(chunk)
-    os.replace(part, dest)
-    meta = {"source_id": source_id, "url": url, "final_url": final_url, "http_status": status,
-            "etag": etag, "last_modified": lm, "bytes": n, "sha256": h.hexdigest(),
-            "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
-    json.dump(meta, open(meta_path, "w"), indent=1)
-    row.update({"final_url": final_url, "http_status": status, "etag": etag, "last_modified": lm,
-                "bytes": n, "sha256": meta["sha256"], "action": "downloaded", "note": ""})
-    append_csv(P["download_log"], LOG_FIELDS, [row])
-    log(f"{source_id}: {n:,} bytes sha256={meta['sha256'][:12]}")
-    return meta
+    last_err = None
+    for attempt in range(1, 8):
+        if os.path.exists(part):
+            os.remove(part)
+        log(f"{source_id}: downloading {url} (attempt {attempt})")
+        h = hashlib.sha256()
+        n = 0
+        try:
+            with http_get(url, timeout=900) as r, open(part, "wb") as f:
+                status = r.status
+                final_url = r.geturl()
+                etag = r.headers.get("ETag", "") or head.get("etag", "")
+                lm = r.headers.get("Last-Modified", "") or head.get("last_modified", "")
+                content_length = r.headers.get("Content-Length")
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    f.write(chunk)
+                    n += len(chunk)
+                    if n // (50 << 20) != (n - len(chunk)) // (50 << 20):
+                        log(f"{source_id}: {n / 1e6:.0f} MB")
+            if content_length and int(content_length) != n:
+                raise IOError(f"short download {n} bytes, Content-Length {content_length}")
+            os.replace(part, dest)
+            meta = {"source_id": source_id, "url": url, "final_url": final_url, "http_status": status,
+                    "etag": etag, "last_modified": lm, "bytes": n, "sha256": h.hexdigest(),
+                    "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
+            json.dump(meta, open(meta_path, "w"), indent=1)
+            row.update({"final_url": final_url, "http_status": status, "etag": etag, "last_modified": lm,
+                        "bytes": n, "sha256": meta["sha256"], "action": "downloaded",
+                        "note": "" if attempt == 1 else f"succeeded on attempt {attempt}"})
+            append_csv(P["download_log"], LOG_FIELDS, [row])
+            log(f"{source_id}: {n:,} bytes sha256={meta['sha256'][:12]}")
+            return meta
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log(f"{source_id}: attempt {attempt} failed: {e}")
+            if os.path.exists(part):
+                os.remove(part)
+            if attempt < 7:
+                time.sleep(min(30, 3 * attempt))
+    raise last_err
 
 
 def discover_sba_url():
@@ -258,19 +278,48 @@ def discover_sba_url():
     return s["fallback_url"], "pattern not found on dataset page; using configured URL"
 
 
+def dol_year_published(year):
+    """Both Form 5500 and 5500-SF Latest zips must exist. The HTML catalog is often HTTP 403."""
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        url = CFG["sources"][sid]["url_template"].format(year=year)
+        if head_info(url).get("status") != 200:
+            return False
+    return True
+
+
 def discover_dol_years():
+    """Return (years, note). Prefer the catalog page; otherwise probe askebsa for the two newest published years."""
     s = CFG["sources"]["DOL_FORM_5500"]
+    page_error = ""
     try:
-        page = http_get(s["dataset_page"]).read().decode("utf-8", "replace")
+        page = http_get(s["dataset_page"], timeout=45).read().decode("utf-8", "replace")
         years = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
         sf_years = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
         years = [y for y in years if y in sf_years]
         if years:
-            return years[-2:]
-    except Exception:  # noqa: BLE001
-        pass
+            chosen = years[-2:]
+            return chosen, f"discovered on dataset page ({len(years)} year(s) listed; using {chosen})"
+        page_error = "pattern not found on dataset page"
+    except Exception as e:  # noqa: BLE001
+        page_error = str(e)
+    found, missing = [], []
+    for y in range(TODAY.year + 1, TODAY.year - 8, -1):
+        if dol_year_published(y):
+            found.append(y)
+            if len(found) >= 2:
+                break
+        else:
+            missing.append(y)
+    found.sort()
+    if found:
+        note = (f"DOL catalog unreachable ({page_error}); probed askebsa. "
+                f"HTTP 200 for {found[-2:]}; not published yet: {sorted(missing)}")
+        log(note)
+        return found[-2:], note
     y = TODAY.year - 1
-    return [y - 1, y]
+    note = f"DOL probe failed ({page_error}); fallback years {[y - 1, y]}"
+    log(note)
+    return [y - 1, y], note
 
 
 def cmd_fetch(force=False):
@@ -290,10 +339,15 @@ def cmd_fetch(force=False):
                        "attribution": m.get("attribution")}
         except Exception as e:  # noqa: BLE001
             tx_meta = {"error": str(e)}
+        try:
+            counted = json.load(http_get("https://data.texas.gov/resource/9cir-efmm.json?$select=count(*)"))
+            tx_meta["api_row_count"] = int(counted[0]["count"])
+        except Exception as e:  # noqa: BLE001
+            tx_meta["api_row_count_error"] = str(e)
         fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
         if fetched["TX_FRANCHISE_9CIR_EFMM"]:
             fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
-    years = discover_dol_years()
+    years, dol_how = discover_dol_years()
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
         for y in years:
@@ -305,7 +359,7 @@ def cmd_fetch(force=False):
     files = (manifest.get("fetch") or {}).get("files") or {}
     files.update({k: v for k, v in fetched.items() if v})
     manifest.pop("build", None)
-    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": files}
+    manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "dol_year_discovery": dol_how, "files": files}
     save_manifest(manifest)
     return manifest
 
@@ -317,7 +371,8 @@ def safe_download(source_id, url, dest, force):
         append_csv(P["download_log"], LOG_FIELDS, [{
             "run_id": RUN_ID, "source_id": source_id, "url": url,
             "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "action": "failed", "note": str(e)}])
-        log_unavailable(source_id, source_id, url, f"download failed: {e}")
+        # A dropped connection is recorded in the download log only. It is not a
+        # permanently unavailable source; the next run retries it.
         log(f"{source_id}: FAILED {e}")
         return None
 
@@ -718,6 +773,13 @@ def stage_texas(groups, manifest):
     stats = {"available": True, "data_rows": n, **dec.summary(), "sha256": meta.get("sha256") or sha256_file(path),
              "bytes": os.path.getsize(path), "dataset_rows_updated_at": (meta.get("dataset_metadata") or {}).get("rows_updated_at", ""),
              "retrieved_at_utc": meta.get("retrieved_at_utc", "")}
+    api_n = meta.get("dataset_metadata", {}).get("api_row_count") if isinstance(meta.get("dataset_metadata"), dict) else None
+    if isinstance(api_n, int) and api_n > 0 and abs(n - api_n) / api_n > 0.01:
+        raise SystemExit(f"Texas franchise scan has {n:,} rows but the API count is {api_n:,} "
+                         "(more than 1% apart). Refusing to publish a truncated snapshot.")
+    if n < 3_000_000:
+        raise SystemExit(f"Texas franchise scan has {n:,} rows, under the 3,000,000 minimum. "
+                         "Refusing to publish a truncated snapshot.")
     log(f"TX: scanned {n:,} rows; {sum(map(len, by_name.values()))} name candidates")
     results = {}
     cand_rows = []
@@ -1323,6 +1385,12 @@ TX_STATS, PENSION_STATS = {}, {"files": {}}
 def cmd_build():
     ensure_dirs()
     manifest = load_manifest()
+    if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
+        tx_path = os.path.join(RAW, CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["raw_file"])
+        tx_size = os.path.getsize(tx_path) if os.path.exists(tx_path) else 0
+        if tx_size < 100_000_000:
+            raise SystemExit(f"Texas Active Franchise Taxpayers file missing or truncated ({tx_size} bytes). "
+                             "Refusing to rebuild eligibility without the full 9cir-efmm export.")
     for u in PROFILE.get("unavailable_sources", []):
         log_unavailable(u["source_id"], u["name"], u["checked_url"], u["reason"])
     loans, sba_stats = stage_sba(manifest)
@@ -1358,6 +1426,7 @@ def cmd_build():
         "registry": tx_stats, "registry_match_status": cnt("reg_match_status"),
         "registry_match_confidence": cnt("reg_match_confidence"), "record_age_30plus": cnt("record_age_30plus"),
         "pension": pstats, "pension_status": cnt("pension_status"),
+        "dol_year_discovery": (manifest.get("fetch") or {}).get("dol_year_discovery", ""),
         "payroll_proxy_known": sum(1 for r in cur if r["historical_payroll_proxy_annual"] != "unknown"),
         "eligibility_status": cnt("eligibility_status"), "outreach_status": cnt("outreach_status"),
         "review_queue_rows": len(review_rows), "review_queue_by_stage": dict(Counter(r["stage"] for r in review_rows)),
@@ -1506,6 +1575,7 @@ Retirement-plan participants are not current company headcount. JobsReported is 
  {sba['excluded_blank_borrowerstate_but_projectstate_match']} loans with blank BorrowerState but ProjectState={esc(STATE)} (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
 <tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated " + esc(tx.get('dataset_rows_updated_at', '')[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
 <tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
+ <br>{esc(cov.get('dol_year_discovery', ''))}
  <table><tr><th>file</th><th>rows</th><th>candidates</th><th>encoding</th><th>sha256</th></tr>{pfiles}</table></td></tr>
 </table></div>
 
@@ -1581,6 +1651,10 @@ def cmd_verify():
     check("registry IDs never reused", len([r["biz_id"] for r in reg]) == len({r["biz_id"] for r in reg}))
     check("every tracker ID in registry", tr_ids <= set(reg_active))
     check("outreach_status column present", "outreach_status" in tf)
+    if STATE == "TX":
+        check("Texas franchise snapshot fully scanned",
+              cov.get("registry", {}).get("available") and cov["registry"].get("data_rows", 0) >= 3_000_000,
+              f"{cov.get('registry', {}).get('data_rows')} rows")
     out = {"run_id": RUN_ID, "passed": all(c["ok"] for c in checks), "checks": checks}
     json.dump(out, open(P["verification"], "w"), indent=1)
     if not out["passed"]:

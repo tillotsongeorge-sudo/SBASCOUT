@@ -72,9 +72,9 @@ describe it.
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
 | `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
-| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
+| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years. The DOL HTML catalog often returns HTTP 403, so when that page cannot be read the scout probes `askebsa.dol.gov` and keeps the two newest years where **both** zips return HTTP 200. A future year that is not published yet is not logged as an unavailable source. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
-Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
+Raw files are streamed to `data/raw/` while being SHA-256 hashed. Each download is retried up to 7 times. A short file (Content-Length mismatch, or a Texas export under 100 MB / under 3 million rows / more than 1% off the live API count) is discarded. The Texas build **stops before rewriting the tracker** in that case, so a dropped connection cannot mark every business `review`. Files are kept on disk but are
 git-ignored because of their size. Every fetch appends to `data/download_log.csv` with the URL,
 final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256, and the action
 taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the

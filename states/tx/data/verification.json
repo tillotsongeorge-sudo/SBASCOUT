@@ -1,5 +1,5 @@
 {
- "run_id": "20261007T203102Z",
+ "run_id": "20261026T132251Z",
  "passed": true,
  "checks": [
   {
@@ -55,7 +55,7 @@
   {
    "check": "ledger has no duplicate evidence rows",
    "ok": true,
-   "detail": "2080 rows"
+   "detail": "2082 rows"
   },
   {
    "check": "every current loan has a ledger row",
@@ -126,6 +126,11 @@
    "check": "outreach_status column present",
    "ok": true,
    "detail": ""
+  },
+  {
+   "check": "Texas franchise snapshot fully scanned",
+   "ok": true,
+   "detail": "3494999 rows"
   }
  ]
 }
