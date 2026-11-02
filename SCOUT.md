@@ -71,8 +71,8 @@ describe it.
 | source_id | What | URL |
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
-| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
-| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
+| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (about 3.5M rows). Downloaded only for `--state TX`. The bulk `rows.csv` export drops long connections, so the scout pages the same dataset with SODA (`$order=taxpayer_number`) and keeps the file only when its row count is within 1% of live `count(*)`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
+| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years whose zip files answer HTTP 200 on askebsa. The DOL catalog page is often HTTP 403. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
 git-ignored because of their size. Every fetch appends to `data/download_log.csv` with the URL,
@@ -80,6 +80,16 @@ final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256,
 taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the
 input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
 `states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
+
+Each download is retried up to 7 times. When the server sends `Content-Length`, a short read is
+rejected and retried. A failed attempt is not cached. Transient download failures are written only
+to `data/download_log.csv`. They are not added to `unavailable_sources.csv`, and the tracker is not
+rebuilt when a required file failed. The DOL HTML catalog often returns HTTP 403, so the two newest
+plan years are chosen by probing the askebsa zip URLs (both Form 5500 and 5500-SF must exist).
+
+For Texas, the build also refuses to rewrite the tracker when the 9cir-efmm file is under 100 MB,
+the scanned row count is under 3 million, or that count differs from the live Socrata `count(*)`
+by more than 1%. The permanent ID registry is written only after those checks pass.
 
 **Encoding:** each line is decoded as strict UTF-8 first, then cp1252, then latin-1. The counts
 from each step go into `data/source_manifest.json`. The SBA file decodes as **cp1252**.
