@@ -1,6 +1,6 @@
 {
- "run_id": "20261007T203003Z",
- "as_of_date": "2026-10-07",
+ "run_id": "20261109T132114Z",
+ "as_of_date": "2026-11-09",
  "sba": {
   "source_data_rows": 968524,
   "rows_borrower_state_match": 76193,
@@ -20,7 +20,7 @@
   "source_url": "https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv",
   "data_as_of": "2024-09-30",
   "extract_sha256": "0fa94ed2294c8d911f6fd626f53958ba275ed0e90d0380a90df805495ae9a056",
-  "retrieved_at_utc": "2026-10-07T19:41:41+00:00"
+  "retrieved_at_utc": "2026-11-09T13:10:54+00:00"
  },
  "state": "TX",
  "registry_label": "Texas Active Franchise Taxpayers",
@@ -31,28 +31,30 @@
  "id_merges_this_run": [],
  "registry": {
   "available": true,
-  "data_rows": 3484555,
+  "data_rows": 3523840,
   "encoding_detected": "utf-8",
-  "physical_lines": 3484618,
-  "lines_utf8_non_ascii": 58,
+  "physical_lines": 3523841,
+  "lines_utf8_non_ascii": 65,
   "lines_decoded_cp1252_fallback": 0,
   "lines_decoded_latin1_fallback": 0,
-  "sha256": "d729e973bf0dd232fc355fff82b6d03d9116cfb1749d75b2d8ae6e3756e91249",
-  "bytes": 469377711,
-  "dataset_rows_updated_at": "2026-10-03T08:44:55+00:00",
-  "retrieved_at_utc": "2026-10-07T19:41:41+00:00",
-  "candidate_rows": 922,
+  "sha256": "edee13e6251e1d7944f94fa318b47f878c4e245c026ba47fb15c93df3f4daaf3",
+  "bytes": 608086090,
+  "dataset_rows_updated_at": "2026-11-07T09:43:08+00:00",
+  "retrieved_at_utc": "2026-11-09T13:10:54+00:00",
+  "api_row_count": 3523840,
+  "extract_method": "soda_keyset",
+  "candidate_rows": 926,
   "upgraded_via_dol_ein_address": 12
  },
  "registry_match_status": {
   "verified": 605,
-  "unmatched": 183,
-  "review": 227
+  "unmatched": 180,
+  "review": 230
  },
  "registry_match_confidence": {
-  "high": 365,
+  "high": 366,
   "": 410,
-  "medium": 240
+  "medium": 239
  },
  "record_age_30plus": {
   "no": 421,
@@ -67,68 +69,68 @@
   "files": {
    "DOL_FORM_5500_2024": {
     "member": "f_5500_2024_latest.csv",
-    "data_rows": 226436,
+    "data_rows": 227009,
     "candidate_rows": 102,
     "candidate_rows_without_retirement_benefit_code": 56,
     "encoding_detected": "ascii (utf-8 compatible)",
-    "physical_lines": 226437,
+    "physical_lines": 227010,
     "lines_utf8_non_ascii": 0,
     "lines_decoded_cp1252_fallback": 0,
     "lines_decoded_latin1_fallback": 0,
-    "sha256": "8884391d48a9e362fd7d2b91d6e37430bd2e54355c9dbc3479985c9d876872f8",
-    "bytes": 28642573,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00"
+    "sha256": "32fed2ff2a18e699ea9a49e4647aba06035a39fc2792c90329598fd5ca20dd54",
+    "bytes": 28734523,
+    "retrieved_at_utc": "2026-11-09T13:10:54+00:00"
    },
    "DOL_FORM_5500_2025": {
     "member": "f_5500_2025_latest.csv",
-    "data_rows": 105214,
-    "candidate_rows": 37,
-    "candidate_rows_without_retirement_benefit_code": 24,
+    "data_rows": 186089,
+    "candidate_rows": 66,
+    "candidate_rows_without_retirement_benefit_code": 29,
     "encoding_detected": "ascii (utf-8 compatible)",
-    "physical_lines": 105215,
+    "physical_lines": 186090,
     "lines_utf8_non_ascii": 0,
     "lines_decoded_cp1252_fallback": 0,
     "lines_decoded_latin1_fallback": 0,
-    "sha256": "9f6245cdcbb86ae167af4595bb3dba4fbf7845df98f4ccd6748aa98fa2a4e582",
-    "bytes": 12945186,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00"
+    "sha256": "a8e036b4103280c0d7f50473632b266b0113669d1d14cf15effd898edd573dd7",
+    "bytes": 23445472,
+    "retrieved_at_utc": "2026-11-09T13:10:54+00:00"
    },
    "DOL_FORM_5500_SF_2024": {
     "member": "f_5500_sf_2024_latest.csv",
-    "data_rows": 799188,
-    "candidate_rows": 358,
+    "data_rows": 800594,
+    "candidate_rows": 359,
     "candidate_rows_without_retirement_benefit_code": 3,
     "encoding_detected": "ascii (utf-8 compatible)",
-    "physical_lines": 799189,
+    "physical_lines": 800595,
     "lines_utf8_non_ascii": 0,
     "lines_decoded_cp1252_fallback": 0,
     "lines_decoded_latin1_fallback": 0,
-    "sha256": "11370908e2bbc78d1d418b2f2a2177875e0524c12b69a181432d6fd65a5966c3",
-    "bytes": 136400721,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00"
+    "sha256": "71fe855ee8bdab5f96dda3cee521c8550e4d8df87b86afb06e19824cb32e9915",
+    "bytes": 136629514,
+    "retrieved_at_utc": "2026-11-09T13:10:54+00:00"
    },
    "DOL_FORM_5500_SF_2025": {
     "member": "f_5500_sf_2025_latest.csv",
-    "data_rows": 635438,
-    "candidate_rows": 278,
+    "data_rows": 775905,
+    "candidate_rows": 335,
     "candidate_rows_without_retirement_benefit_code": 1,
     "encoding_detected": "ascii (utf-8 compatible)",
-    "physical_lines": 635439,
+    "physical_lines": 775906,
     "lines_utf8_non_ascii": 0,
     "lines_decoded_cp1252_fallback": 0,
     "lines_decoded_latin1_fallback": 0,
-    "sha256": "2db4677bd93455ccc082d378fdd56594ac90ca0fc6f2da1639a15aea8ed3e94d",
-    "bytes": 105100962,
-    "retrieved_at_utc": "2026-10-07T19:41:41+00:00"
+    "sha256": "feeafd42c9ae248bbc50516f2167d3a9aa4ff7e23b3d3b3dcefe587d2ce6abc2",
+    "bytes": 131008260,
+    "retrieved_at_utc": "2026-11-09T13:10:54+00:00"
    }
   },
-  "eins_known_from_texas": 353,
-  "matched_plan_rows": 256,
-  "low_confidence_plan_rows_review": 251
+  "eins_known_from_texas": 352,
+  "matched_plan_rows": 261,
+  "low_confidence_plan_rows_review": 276
  },
  "pension_status": {
-  "filing found": 245,
-  "unknown (no matched retirement-plan filing in searched years)": 770
+  "filing found": 248,
+  "unknown (no matched retirement-plan filing in searched years)": 767
  },
  "payroll_proxy_known": 573,
  "eligibility_status": {
@@ -140,12 +142,12 @@
   "not_ready": 833,
   "ready": 182
  },
- "review_queue_rows": 523,
+ "review_queue_rows": 552,
  "review_queue_by_stage": {
-  "registration": 246,
-  "pension": 251,
+  "registration": 250,
+  "pension": 276,
   "business_grouping": 26
  },
- "ledger_rows": 2080,
+ "ledger_rows": 2138,
  "tracker_rows": 1015
 }

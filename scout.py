@@ -20,6 +20,9 @@ import os
 import re
 import shutil
 import sys
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
@@ -198,8 +201,18 @@ def head_info(url):
         return {"status": "error", "error": str(e)}
 
 
-def download(source_id, url, dest, force=False):
-    """Stream url -> dest while hashing. Reuse the cached file when ETag/Last-Modified match."""
+def _positive_length(headers):
+    """A missing or zero Content-Length is chunked/unknown, not a short read."""
+    raw = headers.get("Content-Length") if headers else None
+    if raw and str(raw).strip().isdigit() and int(raw) > 0:
+        return int(raw)
+    return None
+
+
+def download(source_id, url, dest, force=False, min_bytes=0):
+    """Stream url -> dest while hashing. Retry, resume when Range is honored, and
+    require a positive Content-Length to match. Reuse the cached file when ETag or
+    Last-Modified matches."""
     meta_path = dest + ".meta.json"
     head = head_info(url)
     row = {"run_id": RUN_ID, "source_id": source_id, "url": url,
@@ -219,31 +232,78 @@ def download(source_id, url, dest, force=False):
             log(f"{source_id}: using cached {os.path.basename(dest)} ({row['action']})")
             return meta
     log(f"{source_id}: downloading {url}")
-    h = hashlib.sha256()
-    n = 0
     part = dest + ".part"
-    with http_get(url, timeout=300) as r, open(part, "wb") as f:
+    if os.path.exists(part) and os.path.exists(meta_path):
+        previous = json.load(open(meta_path))
+        if head.get("etag") and previous.get("etag") and head.get("etag") != previous.get("etag"):
+            os.remove(part)
+    last_err = None
+    for attempt in range(1, 8):
+        try:
+            meta = _stream_to_part(url, part, head, min_bytes)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log(f"{source_id}: attempt {attempt}/7 failed: {e}")
+            if isinstance(e, urllib.error.HTTPError) and e.code == 416 and os.path.exists(part):
+                os.remove(part)
+            time.sleep(min(60, 2 ** attempt))
+    else:
+        raise last_err
+    os.replace(part, dest)
+    meta.update({"source_id": source_id, "url": url, "retrieved_at_utc": NOW.isoformat(timespec="seconds")})
+    json.dump(meta, open(meta_path, "w"), indent=1)
+    row.update({"final_url": meta["final_url"], "http_status": meta["http_status"], "etag": meta["etag"],
+                "last_modified": meta["last_modified"], "bytes": meta["bytes"], "sha256": meta["sha256"],
+                "action": "downloaded", "note": meta.get("note", "")})
+    append_csv(P["download_log"], LOG_FIELDS, [row])
+    log(f"{source_id}: {meta['bytes']:,} bytes sha256={meta['sha256'][:12]}")
+    return meta
+
+
+def _stream_to_part(url, part, head, min_bytes):
+    existing = os.path.getsize(part) if os.path.exists(part) else 0
+    headers = dict(UA)
+    if existing:
+        headers["Range"] = f"bytes={existing}-"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=300) as r:
         status = r.status
+        if status == 200:
+            existing = 0
+            mode = "wb"
+        elif status == 206:
+            mode = "ab"
+        else:
+            raise IOError(f"unexpected HTTP {status}")
         final_url = r.geturl()
         etag = r.headers.get("ETag", "") or head.get("etag", "")
         lm = r.headers.get("Last-Modified", "") or head.get("last_modified", "")
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            h.update(chunk)
-            f.write(chunk)
-            n += len(chunk)
-    os.replace(part, dest)
-    meta = {"source_id": source_id, "url": url, "final_url": final_url, "http_status": status,
-            "etag": etag, "last_modified": lm, "bytes": n, "sha256": h.hexdigest(),
-            "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
-    json.dump(meta, open(meta_path, "w"), indent=1)
-    row.update({"final_url": final_url, "http_status": status, "etag": etag, "last_modified": lm,
-                "bytes": n, "sha256": meta["sha256"], "action": "downloaded", "note": ""})
-    append_csv(P["download_log"], LOG_FIELDS, [row])
-    log(f"{source_id}: {n:,} bytes sha256={meta['sha256'][:12]}")
-    return meta
+        cl = _positive_length(r.headers)
+        expected = (existing + cl) if (cl and status == 206) else cl
+        h = hashlib.sha256()
+        if existing and mode == "ab":
+            with open(part, "rb") as prev:
+                for chunk in iter(lambda: prev.read(1 << 20), b""):
+                    h.update(chunk)
+        n = existing
+        with open(part, mode) as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                h.update(chunk)
+                f.write(chunk)
+                n += len(chunk)
+                if n // (50 << 20) != (n - len(chunk)) // (50 << 20):
+                    log(f"  ... {n:,} bytes")
+    if expected and n != expected:
+        raise IOError(f"short read {n} bytes, Content-Length implies {expected} (positive lengths only)")
+    if min_bytes and n < min_bytes:
+        raise IOError(f"download is {n} bytes, under the {min_bytes} byte minimum")
+    note = "resumed with HTTP Range" if existing else ""
+    return {"final_url": final_url, "http_status": 200, "etag": etag, "last_modified": lm,
+            "bytes": n, "sha256": h.hexdigest(), "note": note}
 
 
 def discover_sba_url():
@@ -258,19 +318,200 @@ def discover_sba_url():
     return s["fallback_url"], "pattern not found on dataset page; using configured URL"
 
 
+def _dol_year_exists(year):
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        url = CFG["sources"][sid]["url_template"].format(year=year)
+        if head_info(url).get("status") != 200:
+            return False
+    return True
+
+
 def discover_dol_years():
+    """The DOL HTML catalog often returns 403. Probe the zip files and keep the two
+    newest years that publish both Form 5500 and Form 5500-SF."""
     s = CFG["sources"]["DOL_FORM_5500"]
+    years = []
     try:
         page = http_get(s["dataset_page"]).read().decode("utf-8", "replace")
-        years = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
+        found = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
         sf_years = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
-        years = [y for y in years if y in sf_years]
+        years = [y for y in found if y in sf_years]
         if years:
-            return years[-2:]
-    except Exception:  # noqa: BLE001
-        pass
+            log(f"DOL catalog page listed plan years {years}")
+    except Exception as e:  # noqa: BLE001
+        log(f"DOL catalog page unavailable ({e}); probing askebsa zips")
+    if not years:
+        found = [y for y in range(TODAY.year + 1, TODAY.year - 5, -1) if _dol_year_exists(y)]
+        years = sorted(found)
+        log(f"DOL zip probe found plan years {years}")
+    if len(years) >= 2:
+        return years[-2:]
+    if len(years) == 1:
+        return years
     y = TODAY.year - 1
     return [y - 1, y]
+
+
+TX_SODA_FIELDS = [
+    ("taxpayer_number", "Taxpayer Number"),
+    ("taxpayer_name", "Taxpayer Name"),
+    ("taxpayer_address", "Taxpayer Address"),
+    ("taxpayer_city", "Taxpayer City"),
+    ("taxpayer_state", "Taxpayer State"),
+    ("taxpayer_zip", "Taxpayer Zip"),
+    ("taxpayer_county_code", "Taxpayer County Code"),
+    ("taxpayer_organizational_type", "Taxpayer Organizational Type"),
+    ("record_type_code", "Record Type Code"),
+    ("responsibility_beginning_date", "Responsibility Beginning Date"),
+    ("secretary_of_state_sos_or_coa_file_number", "Secretary of State (SOS) or COA File Number"),
+    ("sos_charter_date", "SOS Charter Date"),
+    ("sos_status_date", "SOS Status Date"),
+    ("sos_status_code", "SOS Status Code"),
+    ("right_to_transact_business_code", "Right to Transact Business Code"),
+    ("current_exempt_reason_code", "Current Exempt Reason Code"),
+    ("exempt_begin_date", "Exempt Begin Date"),
+    ("_621111", "NAICS Code"),
+]
+
+
+def _texas_dataset_meta():
+    t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
+    m = json.load(http_get(t["metadata_url"]))
+    return {"rows_updated_at": dt.datetime.fromtimestamp(m.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
+            "attribution": m.get("attribution")}
+
+
+def _texas_api_count():
+    url = "https://data.texas.gov/resource/9cir-efmm.json?" + urllib.parse.urlencode({"$select": "count(*)"})
+    data = json.load(http_get(url, timeout=120))
+    return int(data[0]["count"]), url
+
+
+def _soda_page_url(last, page_size):
+    select = ",".join(api for api, _ in TX_SODA_FIELDS)
+    url = ("https://data.texas.gov/resource/9cir-efmm.csv?$select=" + urllib.parse.quote(select, safe=",")
+           + "&$order=taxpayer_number&$limit=" + str(page_size))
+    if last:
+        # Keep the raw taxpayer number, including trailing spaces, so the keyset advances.
+        escaped = last.replace("'", "''")
+        url += "&$where=" + urllib.parse.quote(f"taxpayer_number > '{escaped}'", safe="")
+    return url
+
+
+def _read_soda_page(url):
+    last_err = None
+    for attempt in range(1, 8):
+        try:
+            with http_get(url, timeout=180) as r:
+                body = r.read()
+                status = r.status
+            text = body.decode("utf-8")
+            rows = list(csv.reader(io.StringIO(text)))
+            if not rows:
+                raise IOError("empty SODA page")
+            return status, rows[0], rows[1:]
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log(f"TX SODA page attempt {attempt}/7 failed: {e}")
+            time.sleep(min(60, 2 ** attempt))
+    raise last_err
+
+
+def fetch_texas(force=False):
+    """Bulk rows.csv advertises Content-Length 0 and is deprecated. Download the same
+    dataset with a SODA keyset on taxpayer_number and require the row count to equal count(*)."""
+    t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
+    dest = os.path.join(RAW, t["raw_file"])
+    meta_path = dest + ".meta.json"
+    count, count_url = _texas_api_count()
+    dataset_meta = _texas_dataset_meta()
+    bulk = head_info(t["url"])
+    append_csv(P["download_log"], LOG_FIELDS, [{
+        "run_id": RUN_ID, "source_id": "TX_FRANCHISE_9CIR_EFMM", "url": t["url"],
+        "final_url": bulk.get("final_url", t["url"]), "retrieved_at_utc": NOW.isoformat(timespec="seconds"),
+        "http_status": bulk.get("status"), "etag": bulk.get("etag", ""), "last_modified": bulk.get("last_modified", ""),
+        "bytes": bulk.get("length") or 0, "sha256": "", "raw_path": os.path.relpath(dest, ROOT),
+        "action": "skipped",
+        "note": "bulk rows.csv Content-Length is 0 (chunked). Not used: a zero length is not a completed file. "
+                "SODA keyset $order=taxpayer_number is downloaded instead and checked against count(*)."}])
+    log(f"TX franchise: count(*)={count:,} updated {dataset_meta.get('rows_updated_at')}")
+    row = {"run_id": RUN_ID, "source_id": "TX_FRANCHISE_9CIR_EFMM", "url": count_url,
+           "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "raw_path": os.path.relpath(dest, ROOT)}
+    if os.path.exists(dest) and os.path.exists(meta_path) and not force:
+        meta = json.load(open(meta_path))
+        same_count = meta.get("api_row_count") == count
+        same_updated = (meta.get("dataset_metadata") or {}).get("rows_updated_at") == dataset_meta.get("rows_updated_at")
+        if same_count and same_updated and meta.get("sha256") and sha256_file(dest) == meta["sha256"]:
+            row.update({"final_url": meta.get("final_url", ""), "http_status": 200, "etag": "",
+                        "last_modified": meta.get("last_modified", ""), "bytes": meta["bytes"], "sha256": meta["sha256"],
+                        "action": "cached", "note": f"api_row_count {count} unchanged since {meta['retrieved_at_utc']}"})
+            append_csv(P["download_log"], LOG_FIELDS, [row])
+            log("TX_FRANCHISE_9CIR_EFMM: using cached SODA extract")
+            return meta
+    page_size = 50000
+    part = dest + ".part"
+    if os.path.exists(part):
+        os.remove(part)
+    hasher = hashlib.sha256()
+    n_rows = 0
+    pages = 0
+    last = ""
+    header = [label for _, label in TX_SODA_FIELDS]
+    api_names = [api for api, _ in TX_SODA_FIELDS]
+    log("TX_FRANCHISE_9CIR_EFMM: downloading SODA keyset")
+    with open(part, "wb") as out:
+        while True:
+            status, got_header, data = _read_soda_page(_soda_page_url(last, page_size))
+            if got_header:
+                got_header[0] = got_header[0].lstrip("\ufeff")
+            idx = {name: i for i, name in enumerate(got_header)}
+            missing = [api for api in api_names if api not in idx]
+            if missing:
+                raise IOError("SODA page missing columns: " + ", ".join(missing))
+            if not data:
+                break
+            cursor = data[-1][idx["taxpayer_number"]]
+            if cursor == last:
+                raise IOError(f"SODA keyset did not advance at taxpayer_number {cursor!r}")
+            buf = io.StringIO()
+            writer = csv.writer(buf, lineterminator="\n")
+            if pages == 0:
+                writer.writerow(header)
+            for rec in data:
+                writer.writerow([
+                    (rec[idx[api]] if idx[api] < len(rec) else "").replace("\r", " ").replace("\n", " ").strip()
+                    for api in api_names
+                ])
+            blob = buf.getvalue().encode("utf-8")
+            hasher.update(blob)
+            out.write(blob)
+            n_rows += len(data)
+            pages += 1
+            last = cursor
+            log(f"TX SODA page {pages}: {n_rows:,} rows")
+            if n_rows >= count:
+                break
+            if pages > (count // 1000) + 5:
+                raise IOError(f"SODA paging stopped advancing at {n_rows} of {count} rows")
+    if n_rows != count:
+        if os.path.exists(part):
+            os.remove(part)
+        raise IOError(f"SODA extract has {n_rows} rows, live count(*) is {count}")
+    os.replace(part, dest)
+    meta = {"source_id": "TX_FRANCHISE_9CIR_EFMM", "url": "https://data.texas.gov/resource/9cir-efmm.csv?$order=taxpayer_number",
+            "final_url": "https://data.texas.gov/resource/9cir-efmm.csv?$order=taxpayer_number",
+            "http_status": 200, "etag": "", "last_modified": dataset_meta.get("rows_updated_at", ""),
+            "bytes": os.path.getsize(dest), "sha256": hasher.hexdigest(),
+            "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "api_row_count": count,
+            "data_rows": n_rows, "pages": pages, "page_size": page_size, "method": "soda_keyset",
+            "dataset_metadata": dataset_meta, "count_url": count_url}
+    json.dump(meta, open(meta_path, "w"), indent=1)
+    row.update({"final_url": meta["final_url"], "http_status": 200, "etag": "", "last_modified": meta["last_modified"],
+                "bytes": meta["bytes"], "sha256": meta["sha256"], "action": "downloaded",
+                "note": f"SODA keyset pages={pages} page_size={page_size} rows={n_rows} count(*)={count}"})
+    append_csv(P["download_log"], LOG_FIELDS, [row])
+    log(f"TX_FRANCHISE_9CIR_EFMM: {n_rows:,} rows sha256={meta['sha256'][:12]}")
+    return meta
 
 
 def cmd_fetch(force=False):
@@ -279,27 +520,28 @@ def cmd_fetch(force=False):
     fetched = {}
     sba_url, how = discover_sba_url()
     s = CFG["sources"]["SBA_PPP_150K_PLUS"]
-    fetched["SBA_PPP_150K_PLUS"] = safe_download("SBA_PPP_150K_PLUS", sba_url, os.path.join(RAW, s["raw_file"]), force)
+    fetched["SBA_PPP_150K_PLUS"] = safe_download(
+        "SBA_PPP_150K_PLUS", sba_url, os.path.join(RAW, s["raw_file"]), force, min_bytes=100_000_000)
     if fetched["SBA_PPP_150K_PLUS"]:
         fetched["SBA_PPP_150K_PLUS"]["discovery"] = how
     if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
-        t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
         try:
-            m = json.load(http_get(t["metadata_url"]))
-            tx_meta = {"rows_updated_at": dt.datetime.fromtimestamp(m.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
-                       "attribution": m.get("attribution")}
+            fetched["TX_FRANCHISE_9CIR_EFMM"] = fetch_texas(force)
         except Exception as e:  # noqa: BLE001
-            tx_meta = {"error": str(e)}
-        fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
-        if fetched["TX_FRANCHISE_9CIR_EFMM"]:
-            fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
+            append_csv(P["download_log"], LOG_FIELDS, [{
+                "run_id": RUN_ID, "source_id": "TX_FRANCHISE_9CIR_EFMM",
+                "url": "https://data.texas.gov/resource/9cir-efmm.csv?$order=taxpayer_number",
+                "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "action": "failed", "note": str(e)}])
+            log(f"TX_FRANCHISE_9CIR_EFMM: FAILED {e}")
+            fetched["TX_FRANCHISE_9CIR_EFMM"] = None
     years = discover_dol_years()
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
         for y in years:
             key = f"{sid}_{y}"
             fetched[key] = safe_download(key, d["url_template"].format(year=y),
-                                         os.path.join(RAW, d["raw_file_template"].format(year=y)), force)
+                                         os.path.join(RAW, d["raw_file_template"].format(year=y)), force,
+                                         min_bytes=1_000_000)
             if fetched[key]:
                 fetched[key]["plan_year"] = y
     files = (manifest.get("fetch") or {}).get("files") or {}
@@ -310,14 +552,13 @@ def cmd_fetch(force=False):
     return manifest
 
 
-def safe_download(source_id, url, dest, force):
+def safe_download(source_id, url, dest, force, min_bytes=0):
     try:
-        return download(source_id, url, dest, force)
+        return download(source_id, url, dest, force, min_bytes=min_bytes)
     except Exception as e:  # noqa: BLE001
         append_csv(P["download_log"], LOG_FIELDS, [{
             "run_id": RUN_ID, "source_id": source_id, "url": url,
             "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "action": "failed", "note": str(e)}])
-        log_unavailable(source_id, source_id, url, f"download failed: {e}")
         log(f"{source_id}: FAILED {e}")
         return None
 
@@ -614,7 +855,7 @@ def group_loans(loans):
 REG_FIELDS = ["biz_id", "identity_key", "status", "merged_into", "created_run", "last_seen_run", "loan_numbers"]
 
 
-def assign_ids(groups, loans):
+def assign_ids(groups, loans, write=True):
     _, reg = read_csv(P["registry"])
     _, prev_loans = read_csv(P["loans"])
     loan_to_biz = {r["loan_number"]: r["biz_id"] for r in prev_loans if r.get("biz_id")}
@@ -655,8 +896,10 @@ def assign_ids(groups, loans):
         r["loan_numbers"] = ";".join(sorted(old_loans | set(g["loans"])))
         r["last_seen_run"] = RUN_ID
         g["biz_id"] = bid
-    write_csv(P["registry"], REG_FIELDS, sorted(reg_by_id.values(), key=lambda r: r["biz_id"]))
-    return new_ids, merges
+    rows = sorted(reg_by_id.values(), key=lambda r: r["biz_id"])
+    if write:
+        write_csv(P["registry"], REG_FIELDS, rows)
+    return new_ids, merges, rows
 
 
 # --------------------------------------------------------------------------
@@ -682,9 +925,7 @@ def stage_texas(groups, manifest):
     path = os.path.join(RAW, CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["raw_file"])
     stats = {}
     if not os.path.exists(path):
-        log_unavailable("TX_FRANCHISE_9CIR_EFMM", CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["name"],
-                        CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["url"], "raw file not available this run")
-        return {}, {"available": False}
+        raise SystemExit("Texas franchise file missing; tracker and ID registry were not rewritten")
     names, streets = set(), set()
     for g in groups:
         for k in g["ids"]:
@@ -715,9 +956,12 @@ def stage_texas(groups, manifest):
             if hit or (st, z) in streets:
                 rec["_core"], rec["_street"], rec["_zip5"] = cn, st, z
     meta = (manifest.get("fetch", {}).get("files") or {}).get("TX_FRANCHISE_9CIR_EFMM") or {}
+    api_count = meta.get("api_row_count")
     stats = {"available": True, "data_rows": n, **dec.summary(), "sha256": meta.get("sha256") or sha256_file(path),
              "bytes": os.path.getsize(path), "dataset_rows_updated_at": (meta.get("dataset_metadata") or {}).get("rows_updated_at", ""),
-             "retrieved_at_utc": meta.get("retrieved_at_utc", "")}
+             "retrieved_at_utc": meta.get("retrieved_at_utc", ""),
+             "api_row_count": int(api_count) if str(api_count or "").isdigit() else api_count,
+             "extract_method": meta.get("method", "")}
     log(f"TX: scanned {n:,} rows; {sum(map(len, by_name.values()))} name candidates")
     results = {}
     cand_rows = []
@@ -931,9 +1175,7 @@ def scan_dol(groups, tx_results, manifest):
             meta = files.get(key)
             path = os.path.join(RAW, CFG["sources"][sid]["raw_file_template"].format(year=y))
             if not meta or not os.path.exists(path):
-                log_unavailable(key, f"{CFG['sources'][sid]['name']} {y}", CFG["sources"][sid]["url_template"].format(year=y),
-                                "file not downloaded")
-                continue
+                raise SystemExit(f"{key} not downloaded; tracker and ID registry were not rewritten")
             dec = LineDecoder()
             c = Counter()
             with zipfile.ZipFile(path) as z:
@@ -941,6 +1183,8 @@ def scan_dol(groups, tx_results, manifest):
                 with z.open(member) as fb:
                     rdr = csv.reader(decoded_lines(fb, dec))
                     header = next(rdr)
+                    if cols["pension"] not in header or cols["ein"] not in header or cols["pn"] not in header:
+                        raise SystemExit(f"{key} is missing retirement-plan columns; tracker was not rewritten")
                     ix = {k: header.index(v) for k, v in cols.items() if v in header}
                     for row in rdr:
                         c["data_rows"] += 1
@@ -1320,6 +1564,49 @@ def write_loans(groups, loans):
 TX_STATS, PENSION_STATS = {}, {"files": {}}
 
 
+def texas_extract_problems(stats):
+    """Refuse a short or partial Comptroller extract before any ID or tracker write."""
+    reasons = []
+    nbytes = stats.get("bytes") or 0
+    rows = stats.get("data_rows") or 0
+    if nbytes < 100 * 1024 * 1024:
+        reasons.append(f"file is {nbytes} bytes, under 100 MB")
+    if rows < 3_000_000:
+        reasons.append(f"scanned {rows:,} rows, under 3,000,000")
+    try:
+        api_n = int(stats.get("api_row_count") or 0)
+    except (TypeError, ValueError):
+        api_n = 0
+    if not api_n:
+        reasons.append("live count(*) was not recorded")
+    elif abs(rows - api_n) / api_n > 0.01:
+        reasons.append(f"scanned {rows:,} rows is {abs(rows - api_n) / api_n:.2%} off live count(*) {api_n:,}")
+    return reasons
+
+
+def bust_texas_cache():
+    dest = os.path.join(RAW, CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["raw_file"])
+    meta = dest + ".meta.json"
+    if os.path.exists(meta):
+        os.replace(meta, meta + ".rejected")
+        log("TX franchise cache marker set aside so the next run re-downloads")
+
+
+def require_dol_files(manifest):
+    years = (manifest.get("fetch") or {}).get("dol_plan_years") or []
+    if not years:
+        raise SystemExit("no DOL plan years discovered; tracker and ID registry were not rewritten")
+    missing = []
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        for y in years:
+            path = os.path.join(RAW, CFG["sources"][sid]["raw_file_template"].format(year=y))
+            if not os.path.exists(path) or os.path.getsize(path) < 1_000_000 or not zipfile.is_zipfile(path):
+                missing.append(os.path.basename(path))
+    if missing:
+        raise SystemExit("DOL files missing or not valid zips (" + ", ".join(missing)
+                         + "); tracker and ID registry were not rewritten")
+
+
 def cmd_build():
     ensure_dirs()
     manifest = load_manifest()
@@ -1327,19 +1614,30 @@ def cmd_build():
         log_unavailable(u["source_id"], u["name"], u["checked_url"], u["reason"])
     loans, sba_stats = stage_sba(manifest)
     sba_stats["retrieved_at_utc"] = ((manifest.get("fetch", {}).get("files") or {}).get("SBA_PPP_150K_PLUS") or {}).get("retrieved_at_utc", "")
+    if sba_stats["source_data_rows"] < 500_000 or sba_stats.get("bytes", 0) < 100_000_000:
+        raise SystemExit(
+            f"SBA file looks truncated ({sba_stats['source_data_rows']} rows, {sba_stats.get('bytes')} bytes); "
+            "tracker and ID registry were not rewritten")
     groups, review_notes = group_loans(loans)
-    new_ids, merges = assign_ids(groups, loans)
+    new_ids, merges, reg_rows = assign_ids(groups, loans, write=False)
     if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
         tx_results, tx_stats = stage_texas(groups, manifest)
+        problems = texas_extract_problems(tx_stats)
+        if problems:
+            bust_texas_cache()
+            raise SystemExit("Texas extract failed checks (" + "; ".join(problems)
+                             + "). Tracker and ID registry were not rewritten.")
     else:
         note = PROFILE["registry_unavailable_note"]
         tx_results = {g["biz_id"]: {"status": "not_checked", "match": None, "candidates": [], "note": note} for g in groups}
         tx_stats = {"available": False, "note": note}
     TX_STATS.update(tx_stats)
+    require_dol_files(manifest)
     hits, pstats = scan_dol(groups, tx_results, manifest)
     if tx_stats.get("available"):
         tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
     pension, pstats = match_pension(groups, tx_results, hits, pstats)
+    write_csv(P["registry"], REG_FIELDS, reg_rows)
     if tx_stats.get("available"):
         write_tx_candidates(tx_results)
     PENSION_STATS.update(pstats)

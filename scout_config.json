@@ -27,13 +27,13 @@
     "DOL_FORM_5500": {
       "name": "DOL EBSA Form 5500 dataset (Latest)",
       "dataset_page": "https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets",
-      "url_template": "https://askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_{year}_Latest.zip",
+      "url_template": "https://www.askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_{year}_Latest.zip",
       "raw_file_template": "F_5500_{year}_Latest.zip"
     },
     "DOL_FORM_5500_SF": {
       "name": "DOL EBSA Form 5500-SF dataset (Latest)",
       "dataset_page": "https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets",
-      "url_template": "https://askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_SF_{year}_Latest.zip",
+      "url_template": "https://www.askebsa.dol.gov/FOIA%20Files/{year}/Latest/F_5500_SF_{year}_Latest.zip",
       "raw_file_template": "F_5500_SF_{year}_Latest.zip"
     }
   },
