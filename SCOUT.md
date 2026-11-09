@@ -71,15 +71,27 @@ describe it.
 | source_id | What | URL |
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
-| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
-| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
+| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (about 3.5M rows). Downloaded only for `--state TX`. The bulk `rows.csv` export is deprecated (sunset 2026-12-22) and returns `Content-Length: 0`, so a zero length is not treated as a finished file. The scout downloads a SODA keyset (`$order=taxpayer_number`) and keeps it only when the row count equals live `count(*)`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
+| `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). The DOL HTML catalog often returns HTTP 403, so the scout probes `https://www.askebsa.dol.gov/FOIA%20Files/<year>/Latest/` and uses the two newest years for which both zips exist. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
 git-ignored because of their size. Every fetch appends to `data/download_log.csv` with the URL,
 final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256, and the action
-taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the
-input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
+taken (`downloaded`, `cached`, `skipped`, or `failed`). That log, together with the URL and hash,
+makes the input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
 `states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
+
+Downloads retry up to 7 times. When the server honors `Range`, a partial file is resumed. A
+**positive** `Content-Length` must match the bytes saved. `Content-Length: 0` is chunked or unknown
+and is not treated as a completed or short file. A failed download is recorded only in
+`data/download_log.csv`. It is not added to `unavailable_sources.csv`, which is reserved for sources
+that are structurally unavailable (no bulk original license dates, paid SOSDirect, no per-loan SBA page).
+
+The tracker and the permanent ID registry are written only after the inputs pass. For Texas that
+means the franchise extract is at least 100 MB, the scan is at least 3 million rows, and the scan
+is within 1% of live `count(*)`. The SBA file must be at least 100 MB and 500,000 data rows, and
+both DOL zips for the chosen years must be real zip files. If a check fails, the previous tracker
+and IDs stay as they were.
 
 **Encoding:** each line is decoded as strict UTF-8 first, then cp1252, then latin-1. The counts
 from each step go into `data/source_manifest.json`. The SBA file decodes as **cp1252**.
@@ -112,7 +124,9 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    never reused or renumbered. If a rerun merges two IDs, the lower one survives, the other is
    marked `merged` in the registry, and non-pipeline tracker columns are carried over. Businesses
    that vanish from the source stay in the tracker with `in_current_source=no`.
-5. **Registration.** Texas uses 9cir-efmm, as described here. Massachusetts has no registry source
+5. **Registration.** Texas uses 9cir-efmm, downloaded as a SODA keyset ordered by `taxpayer_number`
+   and checked against `count(*)`. A cached extract is reused only when both the live row count and
+   `rowsUpdatedAt` are unchanged. Massachusetts has no registry source
    (see above), so every business gets `reg_match_status=not_checked`. The registry columns are
    named `reg_*`. Old `tx_*` columns are renamed automatically on the next run. For Texas,
    candidates come from an equal normalized name (legal name or
