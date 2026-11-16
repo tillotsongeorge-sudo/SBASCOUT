@@ -63,7 +63,7 @@ describe it.
 |---|---|
 | Run code | `python3 -c "print('ok')"` |
 | Download full files | `curl -sSI https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv` returns 200 with a ~452 MB length |
-| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$limit=1"` returns JSON (needed for Texas only) |
+| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$select=count(*)"` returns a count (needed for Texas only) |
 | Save outputs | `touch data/.w && rm data/.w` |
 
 ## 1. Sources
@@ -71,7 +71,7 @@ describe it.
 | source_id | What | URL |
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
-| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
+| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (about 3.5M rows). Downloaded only for `--state TX`, by SODA keyset (`$order=taxpayer_number`, 50,000 rows per page). The bulk `rows.csv` export is not used: it returns `Content-Length: 0` and is deprecated (sunset 2026-12-22). A zero length is not treated as a finished file. The extract is kept only when its row count equals `count(*)` for that `rowsUpdatedAt` snapshot. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
 | `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
@@ -80,6 +80,15 @@ final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256,
 taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the
 input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
 `states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
+
+**Downloads.** SBA and DOL files must advertise a positive `Content-Length`. The transfer retries
+up to 7 times and resumes with `Range` when the server honors it. A short read is a failure, not a
+cached file. The Texas extract is cached only when both `count(*)` and `rowsUpdatedAt` are
+unchanged and the local SHA-256 still matches. A transient failure is written to
+`data/download_log.csv` only. It is not added to `unavailable_sources.csv`, and it does not rewrite
+the tracker. The build also refuses to write the tracker or the ID registry when the SBA file is
+under 100 MB or 500,000 rows, or when the Texas file is under 100 MB, the scan is under 3 million
+rows, or the scan does not equal `count(*)`.
 
 **Encoding:** each line is decoded as strict UTF-8 first, then cp1252, then latin-1. The counts
 from each step go into `data/source_manifest.json`. The SBA file decodes as **cp1252**.

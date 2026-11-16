@@ -20,8 +20,10 @@
       "name": "Texas Comptroller - Active Franchise Taxpayers (9cir-efmm)",
       "dataset_page": "https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm",
       "metadata_url": "https://data.texas.gov/api/views/9cir-efmm.json",
-      "url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD",
+      "url": "https://data.texas.gov/resource/9cir-efmm.json",
+      "bulk_csv_url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD",
       "record_url": "https://data.texas.gov/resource/9cir-efmm.json?taxpayer_number={id}",
+      "page_size": 50000,
       "raw_file": "tx_active_franchise_taxpayers.csv"
     },
     "DOL_FORM_5500": {
