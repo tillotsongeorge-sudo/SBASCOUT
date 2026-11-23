@@ -1,5 +1,5 @@
 {
- "run_id": "20261007T203102Z",
+ "run_id": "20261123T131753Z",
  "passed": true,
  "checks": [
   {
@@ -55,7 +55,7 @@
   {
    "check": "ledger has no duplicate evidence rows",
    "ok": true,
-   "detail": "2080 rows"
+   "detail": "2138 rows"
   },
   {
    "check": "every current loan has a ledger row",
@@ -126,6 +126,21 @@
    "check": "outreach_status column present",
    "ok": true,
    "detail": ""
+  },
+  {
+   "check": "SBA source was fully counted",
+   "ok": true,
+   "detail": "968524"
+  },
+  {
+   "check": "Texas scan matches count(*)",
+   "ok": true,
+   "detail": "3541371 vs 3541371"
+  },
+  {
+   "check": "both latest DOL files were scanned",
+   "ok": true,
+   "detail": "DOL_FORM_5500_2024=227009, DOL_FORM_5500_2025=186089, DOL_FORM_5500_SF_2024=800594, DOL_FORM_5500_SF_2025=775905"
   }
  ]
 }

@@ -20,6 +20,9 @@ import os
 import re
 import shutil
 import sys
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
@@ -71,6 +74,11 @@ UA = {"User-Agent": "off-market-scout/1.0 (+SCOUT.md)"}
 NOW = dt.datetime.now(dt.timezone.utc)
 RUN_ID = NOW.strftime("%Y%m%dT%H%M%SZ")
 TODAY = NOW.date()
+MIN_SBA_BYTES = 100_000_000
+MIN_SBA_ROWS = 500_000
+MIN_TX_BYTES = 100_000_000
+MIN_TX_ROWS = 3_000_000
+MIN_DOL_BYTES = 1_000_000
 
 
 # --------------------------------------------------------------------------
@@ -174,8 +182,11 @@ LOG_FIELDS = ["run_id", "source_id", "url", "final_url", "retrieved_at_utc", "ht
               "etag", "last_modified", "bytes", "sha256", "raw_path", "action", "note"]
 
 
-def http_get(url, timeout=120):
-    req = urllib.request.Request(url, headers=UA)
+def http_get(url, timeout=180, extra_headers=None):
+    headers = dict(UA)
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers)
     return urllib.request.urlopen(req, timeout=timeout)
 
 
@@ -193,55 +204,127 @@ def head_info(url):
         with urllib.request.urlopen(req, timeout=60) as r:
             return {"status": r.status, "etag": r.headers.get("ETag", ""),
                     "last_modified": r.headers.get("Last-Modified", ""),
-                    "length": r.headers.get("Content-Length", ""), "final_url": r.geturl()}
+                    "length": r.headers.get("Content-Length", "") or "", "final_url": r.geturl()}
     except Exception as e:  # noqa: BLE001
         return {"status": "error", "error": str(e)}
 
 
-def download(source_id, url, dest, force=False):
-    """Stream url -> dest while hashing. Reuse the cached file when ETag/Last-Modified match."""
+def _content_length(head):
+    raw = str((head or {}).get("length") or "")
+    return int(raw) if raw.isdigit() else 0
+
+
+def _write_download_meta(source_id, url, dest, meta, action, note=""):
     meta_path = dest + ".meta.json"
+    json.dump(meta, open(meta_path, "w"), indent=1)
+    append_csv(P["download_log"], LOG_FIELDS, [{
+        "run_id": RUN_ID, "source_id": source_id, "url": url,
+        "final_url": meta.get("final_url", url), "retrieved_at_utc": meta["retrieved_at_utc"],
+        "http_status": meta.get("http_status", ""), "etag": meta.get("etag", ""),
+        "last_modified": meta.get("last_modified", ""), "bytes": meta.get("bytes", ""),
+        "sha256": meta.get("sha256", ""), "raw_path": os.path.relpath(dest, ROOT),
+        "action": action, "note": note}])
+    return meta
+
+
+def stream_to_file(url, dest, retries=7, require_length=True, timeout=180):
+    """Stream url to dest. Resume with Range when Content-Length is known and honored.
+
+    A Content-Length of 0 is a failure, not an empty file. Chunked responses (no length)
+    are accepted only when require_length is false; the caller must check completeness.
+    """
     head = head_info(url)
-    row = {"run_id": RUN_ID, "source_id": source_id, "url": url,
-           "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "raw_path": os.path.relpath(dest, ROOT)}
-    if os.path.exists(dest) and os.path.exists(meta_path) and not force:
+    length = _content_length(head)
+    if require_length and (head.get("status") != 200 or length <= 0):
+        raise RuntimeError(f"no positive Content-Length for {url} ({head})")
+    part = dest + ".part"
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            have = os.path.getsize(part) if os.path.exists(part) else 0
+            if length and have > length:
+                os.remove(part)
+                have = 0
+            if length and have == length:
+                break
+            headers = {}
+            resume = bool(length and have > 0)
+            if resume:
+                headers["Range"] = f"bytes={have}-"
+            with http_get(url, timeout=timeout, extra_headers=headers) as r:
+                status = r.status
+                if resume and status != 206:
+                    have = 0
+                    mode = "wb"
+                else:
+                    mode = "ab" if resume and status == 206 else "wb"
+                    if mode == "wb":
+                        have = 0
+                final_url = r.geturl()
+                etag = r.headers.get("ETag", "") or head.get("etag", "")
+                lm = r.headers.get("Last-Modified", "") or head.get("last_modified", "")
+                with open(part, mode) as f:
+                    while True:
+                        chunk = r.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        have += len(chunk)
+                        if have // (50 << 20) != (have - len(chunk)) // (50 << 20):
+                            log(f"  {os.path.basename(dest)}: {have:,} bytes")
+            if have <= 0:
+                raise RuntimeError("empty body")
+            if length and have != length:
+                raise RuntimeError(f"short file {have} != {length}")
+            head = {**head, "status": status, "etag": etag, "last_modified": lm, "final_url": final_url,
+                    "length": str(length or have)}
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            log(f"download attempt {attempt}/{retries} failed for {url}: {e}")
+            if not length and os.path.exists(part):
+                os.remove(part)
+            if attempt == retries:
+                raise RuntimeError(last_err)
+            time.sleep(min(2 ** attempt, 32))
+    os.replace(part, dest)
+    return head
+
+
+def download(source_id, url, dest, force=False, require_length=True):
+    """Stream url -> dest while hashing. Reuse the file when size and ETag/Last-Modified match."""
+    head = head_info(url)
+    length = _content_length(head)
+    meta_path = dest + ".meta.json"
+    if not force and os.path.exists(dest) and os.path.exists(meta_path):
         meta = json.load(open(meta_path))
-        same = head.get("status") == 200 and (
+        size_ok = os.path.getsize(dest) == meta.get("bytes")
+        remote_ok = head.get("status") == 200 and length > 0 and size_ok and (
             (head.get("etag") and head["etag"] == meta.get("etag")) or
             (head.get("last_modified") and head["last_modified"] == meta.get("last_modified")))
-        if same or head.get("status") != 200:
-            row.update({"final_url": meta.get("final_url", url), "http_status": head.get("status"),
-                        "etag": meta.get("etag"), "last_modified": meta.get("last_modified"),
-                        "bytes": meta["bytes"], "sha256": meta["sha256"],
-                        "action": "cached" if same else "cached_remote_unreachable",
-                        "note": f"originally retrieved {meta['retrieved_at_utc']}"})
-            append_csv(P["download_log"], LOG_FIELDS, [row])
-            log(f"{source_id}: using cached {os.path.basename(dest)} ({row['action']})")
+        if remote_ok or (head.get("status") != 200 and size_ok and meta.get("sha256")):
+            action = "cached" if remote_ok else "cached_remote_unreachable"
+            note = f"originally retrieved {meta.get('retrieved_at_utc', '')}"
+            _write_download_meta(source_id, url, dest, meta, action, note)
+            log(f"{source_id}: using cached {os.path.basename(dest)} ({action})")
             return meta
+    if require_length and not force and os.path.exists(dest) and length > 0 and os.path.getsize(dest) == length:
+        log(f"{source_id}: on-disk file matches Content-Length {length}; hashing")
+        meta = {"source_id": source_id, "url": url, "final_url": head.get("final_url", url),
+                "http_status": head.get("status"), "etag": head.get("etag", ""),
+                "last_modified": head.get("last_modified", ""), "bytes": length,
+                "sha256": sha256_file(dest), "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
+        _write_download_meta(source_id, url, dest, meta, "verified_existing", "size matched Content-Length; hashed, not re-downloaded")
+        log(f"{source_id}: {length:,} bytes sha256={meta['sha256'][:12]}")
+        return meta
     log(f"{source_id}: downloading {url}")
-    h = hashlib.sha256()
-    n = 0
-    part = dest + ".part"
-    with http_get(url, timeout=300) as r, open(part, "wb") as f:
-        status = r.status
-        final_url = r.geturl()
-        etag = r.headers.get("ETag", "") or head.get("etag", "")
-        lm = r.headers.get("Last-Modified", "") or head.get("last_modified", "")
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            h.update(chunk)
-            f.write(chunk)
-            n += len(chunk)
-    os.replace(part, dest)
-    meta = {"source_id": source_id, "url": url, "final_url": final_url, "http_status": status,
-            "etag": etag, "last_modified": lm, "bytes": n, "sha256": h.hexdigest(),
-            "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
-    json.dump(meta, open(meta_path, "w"), indent=1)
-    row.update({"final_url": final_url, "http_status": status, "etag": etag, "last_modified": lm,
-                "bytes": n, "sha256": meta["sha256"], "action": "downloaded", "note": ""})
-    append_csv(P["download_log"], LOG_FIELDS, [row])
+    got = stream_to_file(url, dest, require_length=require_length)
+    n = os.path.getsize(dest)
+    meta = {"source_id": source_id, "url": url, "final_url": got.get("final_url", url),
+            "http_status": got.get("status"), "etag": got.get("etag", ""),
+            "last_modified": got.get("last_modified", ""), "bytes": n,
+            "sha256": sha256_file(dest), "retrieved_at_utc": NOW.isoformat(timespec="seconds")}
+    _write_download_meta(source_id, url, dest, meta, "downloaded", "")
     log(f"{source_id}: {n:,} bytes sha256={meta['sha256'][:12]}")
     return meta
 
@@ -258,19 +341,189 @@ def discover_sba_url():
     return s["fallback_url"], "pattern not found on dataset page; using configured URL"
 
 
+def _dol_year_available(year):
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        url = CFG["sources"][sid]["url_template"].format(year=year)
+        info = head_info(url)
+        if info.get("status") != 200 or _content_length(info) < MIN_DOL_BYTES:
+            return False
+    return True
+
+
 def discover_dol_years():
+    """Newest two plan years that publish both Form 5500 and 5500-SF zips.
+
+    The DOL HTML catalog often returns HTTP 403, so a failed page read falls through
+    to HEAD probes of the zip URLs. A missing year is not an unavailable source.
+    """
     s = CFG["sources"]["DOL_FORM_5500"]
+    years = []
     try:
         page = http_get(s["dataset_page"]).read().decode("utf-8", "replace")
-        years = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
+        found = sorted({int(y) for y in re.findall(r"F_5500_(\d{4})_Latest\.zip", page)})
         sf_years = {int(y) for y in re.findall(r"F_5500_SF_(\d{4})_Latest\.zip", page)}
-        years = [y for y in years if y in sf_years]
-        if years:
-            return years[-2:]
-    except Exception:  # noqa: BLE001
-        pass
-    y = TODAY.year - 1
-    return [y - 1, y]
+        years = [y for y in found if y in sf_years]
+    except Exception as e:  # noqa: BLE001
+        log(f"DOL catalog page unavailable ({e}); probing zip URLs")
+    if not years:
+        years = [y for y in range(2020, TODAY.year + 2) if _dol_year_available(y)]
+        log(f"DOL zip probe found {years}")
+    if len(years) >= 2:
+        return years[-2:]
+    if years:
+        return years
+    raise RuntimeError("no DOL Form 5500 / 5500-SF year pair found")
+
+
+def texas_dataset_info():
+    t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
+    meta = json.load(http_get(t["metadata_url"]))
+    count_url = t["soda_json"] + "?" + urllib.parse.urlencode({"$select": "count(*)"})
+    counted = json.load(http_get(count_url))
+    api_count = int(counted[0]["count"])
+    return {
+        "rows_updated_at": dt.datetime.fromtimestamp(meta.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
+        "attribution": meta.get("attribution"),
+        "api_row_count": api_count,
+        "count_url": count_url,
+        "export_url": t["export_url"],
+        "soda_csv": t["soda_csv"],
+    }
+
+
+def csv_data_row_count(path):
+    """Count CSV records, not physical lines. Quoted fields may contain newlines."""
+    dec = LineDecoder()
+    with open(path, "rb") as fb:
+        rdr = csv.reader(decoded_lines(fb, dec))
+        next(rdr, None)
+        n = sum(1 for _ in rdr)
+    return n, dec
+
+
+def _finalize_texas(dest, info, method, note, counted):
+    n, dec = counted
+    if n != info["api_row_count"]:
+        raise RuntimeError(f"Texas CSV has {n:,} records, count(*) is {info['api_row_count']:,}")
+    if os.path.getsize(dest) < MIN_TX_BYTES:
+        raise RuntimeError(f"Texas CSV is only {os.path.getsize(dest)} bytes")
+    url = info["soda_csv"] if method == "soda_keyset" else info["export_url"]
+    meta = {
+        "source_id": "TX_FRANCHISE_9CIR_EFMM", "url": url, "final_url": url,
+        "http_status": 200, "etag": "", "last_modified": "", "bytes": os.path.getsize(dest),
+        "sha256": sha256_file(dest), "retrieved_at_utc": NOW.isoformat(timespec="seconds"),
+        "api_row_count": n, "rows_updated_at": info["rows_updated_at"],
+        "download_method": method, "encoding": dec.summary(),
+        "dataset_metadata": {"rows_updated_at": info["rows_updated_at"], "attribution": info.get("attribution"),
+                             "api_row_count": n, "count_url": info["count_url"]},
+    }
+    _write_download_meta("TX_FRANCHISE_9CIR_EFMM", url, dest, meta, method, note)
+    log(f"TX_FRANCHISE_9CIR_EFMM: {n:,} records via {method} sha256={meta['sha256'][:12]}")
+    return meta
+
+
+def download_texas_keyset(dest, info):
+    """Page the SODA CSV by taxpayer_number. 50,000 is the portal's page cap.
+
+    The cursor keeps the raw taxpayer number, including trailing spaces. Stripping it
+    makes SoQL return the same row again.
+    """
+    page_size = 50000
+    part = dest + ".part"
+    ck_path = dest + ".keyset.json"
+    cursor, written, header, number_ix = "", 0, None, 0
+    if os.path.exists(ck_path) and os.path.exists(part):
+        ck = json.load(open(ck_path))
+        cursor, written, header, number_ix = ck["cursor"], ck["written"], ck["header"], ck["number_ix"]
+        log(f"TX keyset resume at {written:,}, cursor {cursor!r}")
+    elif os.path.exists(part):
+        os.remove(part)
+    pages = 0
+    while written < info["api_row_count"]:
+        params = {"$order": "taxpayer_number", "$limit": str(page_size)}
+        if cursor:
+            params["$where"] = "taxpayer_number > '" + cursor.replace("'", "''") + "'"
+        url = info["soda_csv"] + "?" + urllib.parse.urlencode(params)
+        page_path = dest + ".page.csv"
+        stream_to_file(url, page_path, require_length=False, retries=7)
+        with open(page_path, newline="", encoding="utf-8") as f:
+            rdr = csv.reader(f)
+            ph = next(rdr)
+            rows = list(rdr)
+        if header is None:
+            header = ph
+            number_ix = next(i for i, h in enumerate(header) if h.strip().lower() in ("taxpayer number", "taxpayer_number"))
+            with open(part, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(header)
+        elif [h.strip() for h in ph] != [h.strip() for h in header]:
+            raise RuntimeError("Texas SODA header changed mid-download")
+        if not rows:
+            break
+        first, last = rows[0][number_ix], rows[-1][number_ix]
+        if cursor and first <= cursor:
+            raise RuntimeError(f"Texas keyset did not advance (cursor {cursor!r}, next {first!r})")
+        with open(part, "a", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows(rows)
+        written += len(rows)
+        cursor = last
+        pages += 1
+        json.dump({"cursor": cursor, "written": written, "header": header, "number_ix": number_ix}, open(ck_path, "w"))
+        log(f"TX keyset page {pages}: {written:,} / {info['api_row_count']:,}")
+        if len(rows) < page_size:
+            break
+    if written != info["api_row_count"]:
+        raise RuntimeError(f"Texas keyset wrote {written:,} rows, count(*) is {info['api_row_count']:,}")
+    os.replace(part, dest)
+    if os.path.exists(ck_path):
+        os.remove(ck_path)
+    if os.path.exists(dest + ".page.csv"):
+        os.remove(dest + ".page.csv")
+    return pages
+
+
+def download_texas(force=False):
+    """Full Active Franchise Taxpayers file, checked against SODA count(*).
+
+    The deprecated rows.csv endpoint answers HEAD with Content-Length 0 (sunset
+    2026-12-22) even when a GET still streams bytes. This function never treats
+    that header as a finished file. It uses the v3 CSV export, and if the record
+    count disagrees with count(*) it rebuilds the file with SODA keyset pages.
+    """
+    t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
+    dest = os.path.join(RAW, t["raw_file"])
+    info = texas_dataset_info()
+    meta_path = dest + ".meta.json"
+    if not force and os.path.exists(dest) and os.path.exists(meta_path):
+        meta = json.load(open(meta_path))
+        same = (meta.get("api_row_count") == info["api_row_count"]
+                and meta.get("rows_updated_at") == info["rows_updated_at"]
+                and os.path.getsize(dest) == meta.get("bytes") and meta.get("sha256"))
+        if same:
+            _write_download_meta("TX_FRANCHISE_9CIR_EFMM", meta.get("url", info["export_url"]), dest, meta, "cached",
+                                 f"api_row_count and rowsUpdatedAt unchanged ({info['rows_updated_at']})")
+            log(f"TX_FRANCHISE_9CIR_EFMM: cached {info['api_row_count']:,} records")
+            return meta
+    if not force and os.path.exists(dest) and os.path.getsize(dest) >= MIN_TX_BYTES:
+        log("TX_FRANCHISE_9CIR_EFMM: counting on-disk CSV records")
+        n, dec = csv_data_row_count(dest)
+        if n == info["api_row_count"]:
+            return _finalize_texas(dest, info, "verified_existing",
+                                   f"on-disk CSV records equal count(*) {n}; rowsUpdatedAt {info['rows_updated_at']}", (n, dec))
+        log(f"TX_FRANCHISE_9CIR_EFMM: on-disk file has {n:,} records, count(*) is {info['api_row_count']:,}")
+    log(f"TX_FRANCHISE_9CIR_EFMM: streaming v3 export ({info['api_row_count']:,} records expected)")
+    try:
+        stream_to_file(info["export_url"], dest, require_length=False, retries=3, timeout=300)
+        n, dec = csv_data_row_count(dest)
+        if n == info["api_row_count"] and os.path.getsize(dest) >= MIN_TX_BYTES:
+            return _finalize_texas(dest, info, "v3_export",
+                                   f"v3 export records equal count(*) {n}; rowsUpdatedAt {info['rows_updated_at']}", (n, dec))
+        log(f"TX_FRANCHISE_9CIR_EFMM: v3 export has {n:,} records, not {info['api_row_count']:,}; using SODA keyset")
+    except Exception as e:  # noqa: BLE001
+        log(f"TX_FRANCHISE_9CIR_EFMM: v3 export failed ({e}); using SODA keyset")
+    pages = download_texas_keyset(dest, info)
+    return _finalize_texas(dest, info, "soda_keyset",
+                           f"{pages} SODA pages of 50000 ordered by taxpayer_number; rowsUpdatedAt {info['rows_updated_at']}",
+                           csv_data_row_count(dest))
 
 
 def cmd_fetch(force=False):
@@ -283,16 +536,15 @@ def cmd_fetch(force=False):
     if fetched["SBA_PPP_150K_PLUS"]:
         fetched["SBA_PPP_150K_PLUS"]["discovery"] = how
     if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
-        t = CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]
         try:
-            m = json.load(http_get(t["metadata_url"]))
-            tx_meta = {"rows_updated_at": dt.datetime.fromtimestamp(m.get("rowsUpdatedAt", 0), dt.timezone.utc).isoformat(),
-                       "attribution": m.get("attribution")}
+            fetched["TX_FRANCHISE_9CIR_EFMM"] = download_texas(force)
         except Exception as e:  # noqa: BLE001
-            tx_meta = {"error": str(e)}
-        fetched["TX_FRANCHISE_9CIR_EFMM"] = safe_download("TX_FRANCHISE_9CIR_EFMM", t["url"], os.path.join(RAW, t["raw_file"]), force)
-        if fetched["TX_FRANCHISE_9CIR_EFMM"]:
-            fetched["TX_FRANCHISE_9CIR_EFMM"]["dataset_metadata"] = tx_meta
+            append_csv(P["download_log"], LOG_FIELDS, [{
+                "run_id": RUN_ID, "source_id": "TX_FRANCHISE_9CIR_EFMM",
+                "url": CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["export_url"],
+                "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "action": "failed", "note": str(e)}])
+            log(f"TX_FRANCHISE_9CIR_EFMM: FAILED {e}")
+            fetched["TX_FRANCHISE_9CIR_EFMM"] = None
     years = discover_dol_years()
     for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
         d = CFG["sources"][sid]
@@ -307,17 +559,20 @@ def cmd_fetch(force=False):
     manifest.pop("build", None)
     manifest["fetch"] = {"run_id": RUN_ID, "dol_plan_years": years, "files": files}
     save_manifest(manifest)
+    missing = [k for k, v in fetched.items() if not v]
+    if missing:
+        raise SystemExit(f"required download failed ({', '.join(missing)}); tracker was not modified. See data/download_log.csv")
     return manifest
 
 
 def safe_download(source_id, url, dest, force):
+    """Download failures stay in the download log. They are not 'unavailable sources'."""
     try:
         return download(source_id, url, dest, force)
     except Exception as e:  # noqa: BLE001
         append_csv(P["download_log"], LOG_FIELDS, [{
             "run_id": RUN_ID, "source_id": source_id, "url": url,
             "retrieved_at_utc": NOW.isoformat(timespec="seconds"), "action": "failed", "note": str(e)}])
-        log_unavailable(source_id, source_id, url, f"download failed: {e}")
         log(f"{source_id}: FAILED {e}")
         return None
 
@@ -655,8 +910,11 @@ def assign_ids(groups, loans):
         r["loan_numbers"] = ";".join(sorted(old_loans | set(g["loans"])))
         r["last_seen_run"] = RUN_ID
         g["biz_id"] = bid
+    return new_ids, merges, reg_by_id
+
+
+def commit_registry(reg_by_id):
     write_csv(P["registry"], REG_FIELDS, sorted(reg_by_id.values(), key=lambda r: r["biz_id"]))
-    return new_ids, merges
 
 
 # --------------------------------------------------------------------------
@@ -676,6 +934,16 @@ RECORD_TYPE_MEANING = {
     "V": "Texas SOS Certificate of Authority date: when a foreign (out-of-state) entity registered in Texas; formation elsewhere may be earlier",
     "X": "Comptroller-assigned file number; no SOS charter date exists",
 }
+TX_HEADER_ALIASES = {label.strip().lower(): key for label, key in TX_COLS.items()}
+TX_HEADER_ALIASES.update({
+    "taxpayer_number": "taxpayer_number", "taxpayer_name": "taxpayer_name", "taxpayer_address": "taxpayer_address",
+    "taxpayer_city": "taxpayer_city", "taxpayer_state": "taxpayer_state", "taxpayer_zip": "taxpayer_zip",
+    "taxpayer_organizational_type": "org_type", "record_type_code": "record_type_code",
+    "responsibility_beginning_date": "responsibility_beginning_date",
+    "secretary_of_state_sos_or_coa_file_number": "sos_file_number", "sos_charter_date": "sos_charter_date",
+    "sos_status_date": "sos_status_date", "sos_status_code": "sos_status_code",
+    "right_to_transact_business_code": "right_to_transact_code", "naics_code": "tx_naics", "_621111": "tx_naics",
+})
 
 
 def stage_texas(groups, manifest):
@@ -699,7 +967,14 @@ def stage_texas(groups, manifest):
     with open(path, "rb") as fb:
         rdr = csv.reader(decoded_lines(fb, dec))
         header = [h.strip() for h in next(rdr)]
-        ix = {TX_COLS[h]: i for i, h in enumerate(header) if h in TX_COLS}
+        ix = {}
+        for i, h in enumerate(header):
+            key = TX_HEADER_ALIASES.get(h.strip().lower())
+            if key:
+                ix[key] = i
+        missing = [k for k in ("taxpayer_number", "taxpayer_name", "taxpayer_address", "sos_charter_date", "record_type_code") if k not in ix]
+        if missing:
+            raise SystemExit(f"Texas franchise file is missing columns {missing}")
         for row in rdr:
             n += 1
             rec = {k: row[i].strip() if i < len(row) else "" for k, i in ix.items()}
@@ -715,8 +990,12 @@ def stage_texas(groups, manifest):
             if hit or (st, z) in streets:
                 rec["_core"], rec["_street"], rec["_zip5"] = cn, st, z
     meta = (manifest.get("fetch", {}).get("files") or {}).get("TX_FRANCHISE_9CIR_EFMM") or {}
-    stats = {"available": True, "data_rows": n, **dec.summary(), "sha256": meta.get("sha256") or sha256_file(path),
-             "bytes": os.path.getsize(path), "dataset_rows_updated_at": (meta.get("dataset_metadata") or {}).get("rows_updated_at", ""),
+    api_count = meta.get("api_row_count") or (meta.get("dataset_metadata") or {}).get("api_row_count")
+    stats = {"available": True, "data_rows": n, "api_row_count": api_count,
+             "download_method": meta.get("download_method", ""), **dec.summary(),
+             "sha256": meta.get("sha256") or sha256_file(path),
+             "bytes": os.path.getsize(path),
+             "dataset_rows_updated_at": meta.get("rows_updated_at") or (meta.get("dataset_metadata") or {}).get("rows_updated_at", ""),
              "retrieved_at_utc": meta.get("retrieved_at_utc", "")}
     log(f"TX: scanned {n:,} rows; {sum(map(len, by_name.values()))} name candidates")
     results = {}
@@ -1320,23 +1599,56 @@ def write_loans(groups, loans):
 TX_STATS, PENSION_STATS = {}, {"files": {}}
 
 
+def _require_inputs(manifest):
+    """Stop before any tracker or ID write if a required source file is short or missing."""
+    files = (manifest.get("fetch") or {}).get("files") or {}
+    sba_path = os.path.join(RAW, CFG["sources"]["SBA_PPP_150K_PLUS"]["raw_file"])
+    if not os.path.exists(sba_path) or os.path.getsize(sba_path) < MIN_SBA_BYTES:
+        raise SystemExit(f"refusing to build: SBA file missing or under {MIN_SBA_BYTES} bytes")
+    if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
+        tx = files.get("TX_FRANCHISE_9CIR_EFMM") or {}
+        tx_path = os.path.join(RAW, CFG["sources"]["TX_FRANCHISE_9CIR_EFMM"]["raw_file"])
+        api_count = tx.get("api_row_count") or (tx.get("dataset_metadata") or {}).get("api_row_count")
+        if not os.path.exists(tx_path) or os.path.getsize(tx_path) < MIN_TX_BYTES or not api_count:
+            raise SystemExit("refusing to build: Texas franchise file is missing, under 100 MB, or has no count(*)")
+        if int(api_count) < MIN_TX_ROWS:
+            raise SystemExit(f"refusing to build: Texas count(*) {api_count} is under {MIN_TX_ROWS}")
+    years = (manifest.get("fetch") or {}).get("dol_plan_years") or []
+    if len(years) < 1:
+        raise SystemExit("refusing to build: no DOL plan years in the source manifest")
+    for sid in ("DOL_FORM_5500", "DOL_FORM_5500_SF"):
+        for y in years:
+            path = os.path.join(RAW, CFG["sources"][sid]["raw_file_template"].format(year=y))
+            if not os.path.exists(path) or os.path.getsize(path) < MIN_DOL_BYTES:
+                raise SystemExit(f"refusing to build: {os.path.basename(path)} is missing or under {MIN_DOL_BYTES} bytes")
+
+
 def cmd_build():
     ensure_dirs()
     manifest = load_manifest()
+    _require_inputs(manifest)
     for u in PROFILE.get("unavailable_sources", []):
         log_unavailable(u["source_id"], u["name"], u["checked_url"], u["reason"])
     loans, sba_stats = stage_sba(manifest)
+    if sba_stats["source_data_rows"] < MIN_SBA_ROWS:
+        raise SystemExit(f"refusing to build: SBA data rows {sba_stats['source_data_rows']} < {MIN_SBA_ROWS}. Tracker was not modified.")
     sba_stats["retrieved_at_utc"] = ((manifest.get("fetch", {}).get("files") or {}).get("SBA_PPP_150K_PLUS") or {}).get("retrieved_at_utc", "")
     groups, review_notes = group_loans(loans)
-    new_ids, merges = assign_ids(groups, loans)
+    new_ids, merges, reg_by_id = assign_ids(groups, loans)
     if PROFILE.get("registry") == "TX_FRANCHISE_9CIR_EFMM":
         tx_results, tx_stats = stage_texas(groups, manifest)
+        api_count = int(tx_stats.get("api_row_count") or 0)
+        scanned = int(tx_stats.get("data_rows") or 0)
+        if scanned < MIN_TX_ROWS or scanned != api_count:
+            raise SystemExit(
+                f"refusing to write the tracker: Texas scan has {scanned:,} records, count(*) is {api_count:,}.")
     else:
         note = PROFILE["registry_unavailable_note"]
         tx_results = {g["biz_id"]: {"status": "not_checked", "match": None, "candidates": [], "note": note} for g in groups}
         tx_stats = {"available": False, "note": note}
     TX_STATS.update(tx_stats)
     hits, pstats = scan_dol(groups, tx_results, manifest)
+    commit_registry(reg_by_id)
     if tx_stats.get("available"):
         tx_stats["upgraded_via_dol_ein_address"] = corroborate_texas_via_dol(groups, tx_results, hits)
     pension, pstats = match_pension(groups, tx_results, hits, pstats)
@@ -1504,7 +1816,7 @@ Retirement-plan participants are not current company headcount. JobsReported is 
  encoding: {esc(sba['encoding_detected'])} ({sba['lines_decoded_cp1252_fallback']:,} cp1252-fallback lines) &middot; {sba['physical_lines']:,} physical lines &middot; {sba['source_data_rows']:,} data rows &middot;
  {sba.get('rows_wrong_field_count', 0):,} malformed rows &middot; {sba['duplicate_loan_numbers_in_matches']} duplicate loan numbers &middot;
  {sba['excluded_blank_borrowerstate_but_projectstate_match']} loans with blank BorrowerState but ProjectState={esc(STATE)} (excluded by the BorrowerState rule, listed in coverage_report.json)</td></tr>
-<tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} rows &middot; dataset updated " + esc(tx.get('dataset_rows_updated_at', '')[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
+<tr><th>{esc(reg)}</th><td>{(link(CFG['sources']['TX_FRANCHISE_9CIR_EFMM']['dataset_page'], 'Active Franchise Taxpayers') + f" &middot; {tx.get('data_rows', 0):,} CSV records" + (f" (count(*) {int(tx.get('api_row_count')):,})" if tx.get('api_row_count') else '') + " &middot; " + esc({'verified_existing': 'v3 export, record count matched count(*)', 'v3_export': 'v3 export, record count matched count(*)', 'soda_keyset': 'SODA keyset, record count matched count(*)', 'cached': 'cached file; count(*) and rowsUpdatedAt unchanged'}.get(tx.get('download_method') or '', tx.get('download_method') or 'download')) + " &middot; dataset updated " + esc(str(tx.get('dataset_rows_updated_at', ''))[:10]) + ' &middot; sha256 <code>' + esc(tx.get('sha256', '')) + '</code>') if tx.get('available') else 'unavailable: ' + esc(tx.get('note', ''))}</td></tr>
 <tr><th>DOL Form 5500 / 5500-SF</th><td>plan years {esc(pen.get('plan_years'))}, all sponsor states &middot; EINs known independently from the registry: {pen.get('eins_known_from_texas', 0):,}
  <table><tr><th>file</th><th>rows</th><th>candidates</th><th>encoding</th><th>sha256</th></tr>{pfiles}</table></td></tr>
 </table></div>
@@ -1581,6 +1893,14 @@ def cmd_verify():
     check("registry IDs never reused", len([r["biz_id"] for r in reg]) == len({r["biz_id"] for r in reg}))
     check("every tracker ID in registry", tr_ids <= set(reg_active))
     check("outreach_status column present", "outreach_status" in tf)
+    check("SBA source was fully counted", cov["sba"]["source_data_rows"] >= MIN_SBA_ROWS, str(cov["sba"]["source_data_rows"]))
+    if STATE == "TX":
+        reg_rows = cov["registry"].get("data_rows") or 0
+        api_rows = int(cov["registry"].get("api_row_count") or 0)
+        check("Texas scan matches count(*)", reg_rows == api_rows and reg_rows >= MIN_TX_ROWS, f"{reg_rows} vs {api_rows}")
+    dol_files = cov.get("pension", {}).get("files") or {}
+    check("both latest DOL files were scanned", len(dol_files) >= 2 and all((v.get("data_rows") or 0) > 0 for v in dol_files.values()),
+          ", ".join(f"{k}={v.get('data_rows')}" for k, v in dol_files.items()))
     out = {"run_id": RUN_ID, "passed": all(c["ok"] for c in checks), "checks": checks}
     json.dump(out, open(P["verification"], "w"), indent=1)
     if not out["passed"]:

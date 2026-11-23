@@ -63,26 +63,52 @@ describe it.
 |---|---|
 | Run code | `python3 -c "print('ok')"` |
 | Download full files | `curl -sSI https://data.sba.gov/sites/default/files/distribution/SBA-OCA-2022-07-001/public_150k_plus_240930.csv` returns 200 with a ~452 MB length |
-| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$limit=1"` returns JSON (needed for Texas only) |
+| Call APIs | `curl -s "https://data.texas.gov/resource/9cir-efmm.json?\$select=count(*)"` returns a count (needed for Texas only) |
 | Save outputs | `touch data/.w && rm data/.w` |
+
+Do not treat a Texas `rows.csv` HEAD as proof of an empty file. That deprecated endpoint (sunset 2026-12-22) answers HEAD with `Content-Length: 0` while a GET may still stream. The scout checks the finished CSV record count against SODA `count(*)`.
 
 ## 1. Sources
 
 | source_id | What | URL |
 |---|---|---|
 | `SBA_PPP_150K_PLUS` | SBA PPP FOIA, all loans of $150K and above (one CSV). The newest `public_150k_plus_YYMMDD.csv` is discovered from the dataset page. | https://data.sba.gov/dataset/ppp-foia |
-| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (full CSV export, about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
+| `TX_FRANCHISE_9CIR_EFMM` | Texas only: Comptroller **Active Franchise Taxpayers** (about 3.5M rows). Downloaded only for `--state TX`. | https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm |
 | `DOL_FORM_5500_<year>` / `DOL_FORM_5500_SF_<year>` | EBSA Form 5500 and 5500-SF "Latest" datasets, **national** (all sponsor states). Uses the two newest plan years listed on the DOL page. | https://www.dol.gov/agencies/ebsa/about-ebsa/our-activities/public-disclosure/foia/form-5500-datasets |
 
 Raw files are streamed to `data/raw/` while being SHA-256 hashed. They are kept on disk but are
 git-ignored because of their size. Every fetch appends to `data/download_log.csv` with the URL,
 final URL, UTC retrieval time, HTTP status, ETag, Last-Modified, bytes, SHA-256, and the action
-taken (`downloaded`, `cached`, or `failed`). That log, together with the URL and hash, makes the
-input reproducible. The matching SBA rows are also saved verbatim as UTF-8 in
-`states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
+taken (`downloaded`, `verified_existing`, `cached`, `v3_export`, `soda_keyset`, or `failed`). That
+log, together with the URL and hash, makes the input reproducible. The matching SBA rows are also
+saved verbatim as UTF-8 in `states/<state>/data/extracts/sba_ppp_<state>_238220_150k_raw_rows.csv`.
 
 **Encoding:** each line is decoded as strict UTF-8 first, then cp1252, then latin-1. The counts
 from each step go into `data/source_manifest.json`. The SBA file decodes as **cp1252**.
+
+**SBA and DOL downloads** require a positive `Content-Length`. They retry up to 7 times and resume
+with HTTP Range when the server honors it. A file already on disk is reused when its size matches
+that length (and, on later runs, the ETag or Last-Modified). It is hashed rather than fetched again.
+
+**Texas download.** `rows.csv?accessType=DOWNLOAD` is deprecated and its HEAD `Content-Length` is 0,
+so it is not the source of the file. The scout reads `rowsUpdatedAt` and `count(*)` from the SODA
+API, then:
+
+1. streams `https://data.texas.gov/api/v3/views/9cir-efmm/export.csv`, or
+2. if that record count is not exactly `count(*)`, pages
+   `https://data.texas.gov/resource/9cir-efmm.csv` with `$order=taxpayer_number` and `$limit=50000`,
+   using the raw taxpayer number (trailing spaces included) as the keyset cursor.
+
+The CSV is kept only when its record count equals `count(*)` and the file is at least 100 MB.
+Quoted fields contain newlines, so the check counts CSV records, not physical lines. A later run
+reuses the file only when both `api_row_count` and `rowsUpdatedAt` are unchanged.
+
+**DOL discovery.** The catalog HTML often returns HTTP 403. The scout then probes
+`F_5500_<year>_Latest.zip` and `F_5500_SF_<year>_Latest.zip` and keeps the two newest years for
+which both files exist with a positive length. A year that 404s is simply not published.
+
+A failed download is written to `data/download_log.csv` only. It is not added to
+`unavailable_sources.csv`, and the build stops before it can rewrite the tracker.
 
 ## 2. Pipeline stages
 
@@ -112,7 +138,8 @@ from each step go into `data/source_manifest.json`. The SBA file decodes as **cp
    never reused or renumbered. If a rerun merges two IDs, the lower one survives, the other is
    marked `merged` in the registry, and non-pipeline tracker columns are carried over. Businesses
    that vanish from the source stay in the tracker with `in_current_source=no`.
-5. **Registration.** Texas uses 9cir-efmm, as described here. Massachusetts has no registry source
+5. **Registration.** Texas uses 9cir-efmm, as described here. The build refuses to write the tracker
+   unless the scanned CSV record count equals `count(*)` and is at least 3 million. Massachusetts has no registry source
    (see above), so every business gets `reg_match_status=not_checked`. The registry columns are
    named `reg_*`. Old `tx_*` columns are renamed automatically on the next run. For Texas,
    candidates come from an equal normalized name (legal name or
