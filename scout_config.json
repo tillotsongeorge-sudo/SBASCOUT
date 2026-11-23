@@ -21,6 +21,9 @@
       "dataset_page": "https://data.texas.gov/dataset/Active-Franchise-Taxpayers/9cir-efmm",
       "metadata_url": "https://data.texas.gov/api/views/9cir-efmm.json",
       "url": "https://data.texas.gov/api/views/9cir-efmm/rows.csv?accessType=DOWNLOAD",
+      "export_url": "https://data.texas.gov/api/v3/views/9cir-efmm/export.csv",
+      "soda_csv": "https://data.texas.gov/resource/9cir-efmm.csv",
+      "soda_json": "https://data.texas.gov/resource/9cir-efmm.json",
       "record_url": "https://data.texas.gov/resource/9cir-efmm.json?taxpayer_number={id}",
       "raw_file": "tx_active_franchise_taxpayers.csv"
     },
